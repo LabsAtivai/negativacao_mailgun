@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Negativacao Mailgun -> Snov.io</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2e37;
+    --text: #e6e8eb;
+    --muted: #9aa1ac;
+    --accent: #4f8cff;
+    --ok: #3ecf8e;
+    --warn: #f2b84b;
+    --err: #f2545b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: 420px 1fr; gap: 0; min-height: calc(100vh - 65px); }
+  .runs-panel { border-right: 1px solid var(--border); overflow-y: auto; }
+  .run-row {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .run-row:hover { background: var(--panel); }
+  .run-row.active { background: var(--panel); border-left: 3px solid var(--accent); }
+  .run-row .top { display: flex; justify-content: space-between; margin-bottom: 4px; }
+  .run-row .id { font-weight: 600; }
+  .run-row .muted { color: var(--muted); font-size: 12px; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .badge.completed { background: rgba(62,207,142,0.15); color: var(--ok); }
+  .badge.running { background: rgba(79,140,255,0.15); color: var(--accent); }
+  .badge.failed { background: rgba(242,84,91,0.15); color: var(--err); }
+  .detail { padding: 24px 32px; overflow-y: auto; }
+  .stat-grid { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  .stat {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 18px;
+    min-width: 140px;
+  }
+  .stat .n { font-size: 22px; font-weight: 700; }
+  .stat .l { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 28px; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  tr:hover td { background: var(--panel); }
+  h2 { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin: 0 0 12px; }
+  .empty { color: var(--muted); padding: 40px; text-align: center; }
+  .err-text { color: var(--err); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Negativacao Mailgun &rarr; Snov.io</h1>
+  <div class="sub" id="last-refresh"></div>
+</header>
+<main>
+  <div class="runs-panel" id="runs-panel">
+    <div class="empty">Carregando...</div>
+  </div>
+  <div class="detail" id="detail-panel">
+    <div class="empty">Selecione uma execucao a esquerda.</div>
+  </div>
+</main>
+
+<script>
+const runsPanel = document.getElementById('runs-panel');
+const detailPanel = document.getElementById('detail-panel');
+const lastRefresh = document.getElementById('last-refresh');
+let selectedRunId = null;
+
+function fmtDate(s) {
+  if (!s) return '-';
+  return s.replace('T', ' ').replace('Z', '') + ' UTC';
+}
+
+function badge(status) {
+  return `<span class="badge ${status}">${status}</span>`;
+}
+
+async function loadRuns() {
+  const res = await fetch('/api/runs?limit=100');
+  const runs = await res.json();
+  lastRefresh.textContent = 'Atualizado ' + new Date().toLocaleTimeString('pt-BR');
+
+  if (runs.length === 0) {
+    runsPanel.innerHTML = '<div class="empty">Nenhuma execucao ainda.</div>';
+    return;
+  }
+
+  runsPanel.innerHTML = runs.map(r => `
+    <div class="run-row ${r.id === selectedRunId ? 'active' : ''}" data-id="${r.id}">
+      <div class="top">
+        <span class="id">Run #${r.id}${r.dry_run ? ' (dry-run)' : ''}</span>
+        ${badge(r.status)}
+      </div>
+      <div class="muted">${fmtDate(r.started_at)}</div>
+      <div class="muted">${r.domains_count ?? '-'} dominios &middot; ${r.total_emails ?? '-'} e-mails</div>
+    </div>
+  `).join('');
+
+  runsPanel.querySelectorAll('.run-row').forEach(el => {
+    el.addEventListener('click', () => {
+      selectedRunId = parseInt(el.dataset.id, 10);
+      loadRuns();
+      loadDetail(selectedRunId);
+    });
+  });
+
+  if (selectedRunId === null && runs.length > 0) {
+    selectedRunId = runs[0].id;
+    loadRuns();
+    loadDetail(selectedRunId);
+  }
+}
+
+async function loadDetail(runId) {
+  const res = await fetch(`/api/runs/${runId}`);
+  if (!res.ok) {
+    detailPanel.innerHTML = '<div class="empty">Execucao nao encontrada.</div>';
+    return;
+  }
+  const run = await res.json();
+
+  const domainTotals = {};
+  run.domain_suppressions.forEach(d => {
+    domainTotals[d.domain] = domainTotals[d.domain] || { bounces: 0, complaints: 0, unsubscribes: 0 };
+    domainTotals[d.domain][d.kind] = d.count;
+  });
+  const domainRows = Object.entries(domainTotals)
+    .map(([domain, k]) => ({ domain, ...k, total: (k.bounces||0)+(k.complaints||0)+(k.unsubscribes||0) }))
+    .filter(r => r.total > 0)
+    .sort((a, b) => b.total - a.total);
+
+  const totalAdded = run.account_results.reduce((s, a) => s + (a.added || 0), 0);
+  const totalFailed = run.account_results.reduce((s, a) => s + (a.failed || 0), 0);
+  const totalDup = run.account_results.reduce((s, a) => s + (a.duplicates || 0), 0);
+
+  detailPanel.innerHTML = `
+    <div class="stat-grid">
+      <div class="stat"><div class="n">${badge(run.status)}</div><div class="l">status</div></div>
+      <div class="stat"><div class="n">${run.domains_count ?? '-'}</div><div class="l">dominios Mailgun</div></div>
+      <div class="stat"><div class="n">${run.total_emails ?? '-'}</div><div class="l">e-mails unicos</div></div>
+      <div class="stat"><div class="n">${totalAdded}</div><div class="l">enviados Snov.io</div></div>
+      <div class="stat"><div class="n">${totalDup}</div><div class="l">duplicados</div></div>
+      <div class="stat"><div class="n">${totalFailed}</div><div class="l">falharam</div></div>
+    </div>
+    ${run.error ? `<p class="err-text">Erro: ${run.error}</p>` : ''}
+
+    <h2>Supressoes por dominio (Mailgun)</h2>
+    ${domainRows.length ? `
+    <table>
+      <thead><tr><th>Dominio</th><th>Bounces</th><th>Complaints</th><th>Unsubscribes</th><th>Total</th></tr></thead>
+      <tbody>
+        ${domainRows.map(r => `
+          <tr><td>${r.domain}</td><td>${r.bounces||0}</td><td>${r.complaints||0}</td><td>${r.unsubscribes||0}</td><td>${r.total}</td></tr>
+        `).join('')}
+      </tbody>
+    </table>` : '<p class="muted">Nenhuma supressao com dominios afetados.</p>'}
+
+    <h2>Envio por conta Snov.io</h2>
+    ${run.account_results.length ? `
+    <table>
+      <thead><tr><th>Conta</th><th>List ID</th><th>Enviados</th><th>Duplicados</th><th>Falharam</th><th>Erro</th></tr></thead>
+      <tbody>
+        ${run.account_results.map(a => `
+          <tr>
+            <td>${a.account_label}</td><td>${a.list_id ?? '-'}</td>
+            <td>${a.added}</td><td>${a.duplicates}</td><td>${a.failed}</td>
+            <td class="err-text">${a.error ?? ''}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>` : '<p class="muted">Nenhum envio (dry-run ou sem contas).</p>'}
+  `;
+}
+
+loadRuns();
+setInterval(loadRuns, 10000);
+setInterval(() => { if (selectedRunId !== null) loadDetail(selectedRunId); }, 10000);
+</script>
+</body>
+</html>
