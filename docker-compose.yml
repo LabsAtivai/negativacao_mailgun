@@ -1,23 +1,35 @@
+x-env: &env
+  MAILGUN_API_KEY: ${MAILGUN_API_KEY}
+  MAILGUN_BASE_URL: ${MAILGUN_BASE_URL:-}
+  CREDENTIALS_API_URL: ${CREDENTIALS_API_URL}
+  CREDENTIALS_API_KEY: ${CREDENTIALS_API_KEY}
+  SNOVIO_BATCH_SIZE: ${SNOVIO_BATCH_SIZE:-100}
+  SNOVIO_RATE_LIMIT_PER_MIN: ${SNOVIO_RATE_LIMIT_PER_MIN:-60}
+  PIPELINE_WORKERS: ${PIPELINE_WORKERS:-5}
+  DB_PATH: ${DB_PATH:-/app/data/negativacao.db}
+
 services:
   dashboard:
     build: .
     restart: unless-stopped
     ports:
       - "8080:8080"
-    env_file: .env
+    environment:
+      <<: *env
     volumes:
       - negativacao_data:/app/data
     networks:
       - ativaai
 
   # Um-shot: roda a negativacao e sai. Nao fica em pe sozinho.
-  # Dispare manualmente (Portainer: "Run" nesse servico, ou no host:
-  #   docker compose run --rm negativacao
-  # ) ou agende via cron do host / job do Portainer chamando o mesmo comando.
+  # Dispare manualmente (no host, dentro da pasta do stack):
+  #   docker compose --profile manual run --rm negativacao
+  # ) ou agende via cron do host chamando o mesmo comando.
   negativacao:
     build: .
     command: ["python", "negativacao_mailgun.py"]
-    env_file: .env
+    environment:
+      <<: *env
     volumes:
       - negativacao_data:/app/data
     networks:
