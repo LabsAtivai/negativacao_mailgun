@@ -15,6 +15,10 @@
     --ok: #3ecf8e;
     --warn: #f2b84b;
     --err: #f2545b;
+    /* Categorical (dataviz skill, dark-mode slots 1/2/3 - validated pair + all-pairs) */
+    --series-1: #3987e5; /* bounces */
+    --series-2: #d95926; /* complaints */
+    --series-3: #199e70; /* unsubscribes */
   }
   * { box-sizing: border-box; }
   body {
@@ -32,6 +36,50 @@
   }
   header h1 { font-size: 18px; margin: 0; font-weight: 600; }
   header .sub { color: var(--muted); font-size: 13px; }
+
+  .trend-section {
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--border);
+  }
+  .trend-section h2 { margin: 0 0 14px; }
+  .trend-chart-wrap { overflow-x: auto; padding-bottom: 4px; }
+  .trend-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+    height: 140px;
+    min-width: min-content;
+  }
+  .trend-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    height: 100%;
+    width: 34px;
+    flex: none;
+    cursor: default;
+  }
+  .trend-col .bar-value {
+    font-size: 11px;
+    color: var(--text-secondary, var(--text));
+    margin-bottom: 4px;
+    white-space: nowrap;
+  }
+  .trend-col .bar {
+    width: 22px;
+    background: var(--series-1);
+    border-radius: 4px 4px 0 0;
+    min-height: 2px;
+  }
+  .trend-col .bar-label {
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 6px;
+    white-space: nowrap;
+  }
+  .trend-col:hover .bar { outline: 2px solid var(--text); outline-offset: 1px; }
+
   main { display: grid; grid-template-columns: 420px 1fr; gap: 0; min-height: calc(100vh - 65px); }
   .runs-panel { border-right: 1px solid var(--border); overflow-y: auto; }
   .run-row {
@@ -73,6 +121,59 @@
   h2 { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin: 0 0 12px; }
   .empty { color: var(--muted); padding: 40px; text-align: center; }
   .err-text { color: var(--err); }
+
+  /* Bar chart (domain x supressoes) */
+  .chart-legend { display: flex; gap: 18px; margin-bottom: 14px; font-size: 12px; color: var(--muted); }
+  .chart-legend .key { display: inline-flex; align-items: center; gap: 6px; }
+  .chart-legend .swatch { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+  .chart-rows { margin-bottom: 28px; }
+  .chart-row { display: flex; align-items: center; gap: 10px; padding: 3px 0; }
+  .chart-row .label {
+    width: 220px;
+    flex: none;
+    font-size: 12px;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .chart-row .track {
+    flex: 1 1 auto;
+    display: flex;
+    height: 18px;
+    background: transparent;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .chart-seg {
+    height: 100%;
+    min-width: 2px;
+    border-right: 2px solid var(--bg);
+    cursor: default;
+  }
+  .chart-seg:last-child { border-right: none; border-radius: 0 4px 4px 0; }
+  .chart-row .total {
+    width: 46px;
+    flex: none;
+    font-size: 12px;
+    font-weight: 600;
+    text-align: right;
+  }
+
+  #chart-tooltip {
+    position: fixed;
+    display: none;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 12px;
+    pointer-events: none;
+    z-index: 50;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  }
+  #chart-tooltip .tt-value { font-weight: 700; font-size: 13px; }
+  #chart-tooltip .tt-label { color: var(--muted); margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -80,6 +181,14 @@
   <h1>Negativacao Mailgun &rarr; Snov.io</h1>
   <div class="sub" id="last-refresh"></div>
 </header>
+
+<section class="trend-section">
+  <h2>E-mails unicos por execucao (historico)</h2>
+  <div class="trend-chart-wrap">
+    <div class="trend-chart" id="trend-chart"><div class="empty">Carregando...</div></div>
+  </div>
+</section>
+
 <main>
   <div class="runs-panel" id="runs-panel">
     <div class="empty">Carregando...</div>
@@ -89,9 +198,13 @@
   </div>
 </main>
 
+<div id="chart-tooltip"></div>
+
 <script>
 const runsPanel = document.getElementById('runs-panel');
 const detailPanel = document.getElementById('detail-panel');
+const trendChart = document.getElementById('trend-chart');
+const tooltip = document.getElementById('chart-tooltip');
 const lastRefresh = document.getElementById('last-refresh');
 let selectedRunId = null;
 
@@ -100,8 +213,79 @@ function fmtDate(s) {
   return s.replace('T', ' ').replace('Z', '') + ' UTC';
 }
 
+function fmtDateShort(s) {
+  if (!s) return '-';
+  const d = new Date(s.replace(' ', 'T') + 'Z');
+  if (isNaN(d)) return s.slice(5, 10);
+  return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0');
+}
+
 function badge(status) {
-  return `<span class="badge ${status}">${status}</span>`;
+  const span = document.createElement('span');
+  span.className = 'badge ' + status;
+  span.textContent = status;
+  return span.outerHTML;
+}
+
+function el(tag, props = {}, children = []) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'className') node.className = v;
+    else if (k === 'textContent') node.textContent = v;
+    else if (k.startsWith('data-')) node.setAttribute(k, v);
+    else node[k] = v;
+  }
+  for (const child of children) node.appendChild(child);
+  return node;
+}
+
+function showTooltip(x, y, label, value) {
+  tooltip.innerHTML = '';
+  const valueEl = document.createElement('div');
+  valueEl.className = 'tt-value';
+  valueEl.textContent = value;
+  const labelEl = document.createElement('div');
+  labelEl.className = 'tt-label';
+  labelEl.textContent = label;
+  tooltip.appendChild(valueEl);
+  tooltip.appendChild(labelEl);
+  tooltip.style.display = 'block';
+  tooltip.style.left = (x + 14) + 'px';
+  tooltip.style.top = (y + 14) + 'px';
+}
+
+function hideTooltip() {
+  tooltip.style.display = 'none';
+}
+
+// ---- Trend chart: e-mails unicos por execucao, ao longo do tempo ----
+function renderTrendChart(runs) {
+  if (!runs.length) {
+    trendChart.innerHTML = '<div class="empty">Sem execucoes ainda.</div>';
+    return;
+  }
+  const ordered = [...runs].reverse(); // mais antigo primeiro
+  const max = Math.max(1, ...ordered.map(r => r.total_emails || 0));
+
+  trendChart.innerHTML = '';
+  ordered.forEach(r => {
+    const heightPct = Math.max(2, Math.round(((r.total_emails || 0) / max) * 100));
+    const bar = el('div', { className: 'bar' });
+    bar.style.height = heightPct + '%';
+
+    const col = el('div', { className: 'trend-col' }, [
+      el('div', { className: 'bar-value', textContent: String(r.total_emails ?? '-') }),
+      bar,
+      el('div', { className: 'bar-label', textContent: '#' + r.id + ' ' + fmtDateShort(r.started_at) }),
+    ]);
+
+    col.addEventListener('pointermove', (e) => {
+      showTooltip(e.clientX, e.clientY, 'Run #' + r.id + ' - ' + fmtDate(r.started_at), (r.total_emails ?? '-') + ' e-mails');
+    });
+    col.addEventListener('pointerleave', hideTooltip);
+
+    trendChart.appendChild(col);
+  });
 }
 
 async function loadRuns() {
@@ -109,28 +293,32 @@ async function loadRuns() {
   const runs = await res.json();
   lastRefresh.textContent = 'Atualizado ' + new Date().toLocaleTimeString('pt-BR');
 
+  renderTrendChart(runs);
+
   if (runs.length === 0) {
     runsPanel.innerHTML = '<div class="empty">Nenhuma execucao ainda.</div>';
     return;
   }
 
-  runsPanel.innerHTML = runs.map(r => `
-    <div class="run-row ${r.id === selectedRunId ? 'active' : ''}" data-id="${r.id}">
-      <div class="top">
-        <span class="id">Run #${r.id}${r.dry_run ? ' (dry-run)' : ''}</span>
-        ${badge(r.status)}
-      </div>
-      <div class="muted">${fmtDate(r.started_at)}</div>
-      <div class="muted">${r.domains_count ?? '-'} dominios &middot; ${r.total_emails ?? '-'} e-mails</div>
-    </div>
-  `).join('');
-
-  runsPanel.querySelectorAll('.run-row').forEach(el => {
-    el.addEventListener('click', () => {
-      selectedRunId = parseInt(el.dataset.id, 10);
+  runsPanel.innerHTML = '';
+  runs.forEach(r => {
+    const row = el('div', {
+      className: 'run-row' + (r.id === selectedRunId ? ' active' : ''),
+      'data-id': r.id,
+    }, [
+      el('div', { className: 'top' }, [
+        el('span', { className: 'id', textContent: 'Run #' + r.id + (r.dry_run ? ' (dry-run)' : '') }),
+      ]),
+      el('div', { className: 'muted', textContent: fmtDate(r.started_at) }),
+      el('div', { className: 'muted', textContent: `${r.domains_count ?? '-'} dominios · ${r.total_emails ?? '-'} e-mails` }),
+    ]);
+    row.querySelector('.top').insertAdjacentHTML('beforeend', badge(r.status));
+    row.addEventListener('click', () => {
+      selectedRunId = r.id;
       loadRuns();
       loadDetail(selectedRunId);
     });
+    runsPanel.appendChild(row);
   });
 
   if (selectedRunId === null && runs.length > 0) {
@@ -138,6 +326,49 @@ async function loadRuns() {
     loadRuns();
     loadDetail(selectedRunId);
   }
+}
+
+// ---- Bar chart: supressoes por dominio, empilhado por tipo ----
+function renderDomainChart(domainRows) {
+  const wrap = el('div');
+  const legend = el('div', { className: 'chart-legend' });
+  [['Bounces', 'var(--series-1)'], ['Complaints', 'var(--series-2)'], ['Unsubscribes', 'var(--series-3)']].forEach(([label, color]) => {
+    const swatch = el('span', { className: 'swatch' });
+    swatch.style.background = color;
+    const key = el('span', { className: 'key' }, [swatch, el('span', { textContent: label })]);
+    legend.appendChild(key);
+  });
+  wrap.appendChild(legend);
+
+  const rowsWrap = el('div', { className: 'chart-rows' });
+  const top = domainRows.slice(0, 15);
+  const max = Math.max(1, ...top.map(r => r.total));
+
+  top.forEach(r => {
+    const track = el('div', { className: 'track' });
+    [['bounces', 'var(--series-1)', 'Bounces'], ['complaints', 'var(--series-2)', 'Complaints'], ['unsubscribes', 'var(--series-3)', 'Unsubscribes']]
+      .forEach(([key, color, label]) => {
+        const count = r[key] || 0;
+        if (count <= 0) return;
+        const seg = el('div', { className: 'chart-seg' });
+        seg.style.background = color;
+        seg.style.width = ((count / max) * 100) + '%';
+        seg.addEventListener('pointermove', (e) => {
+          showTooltip(e.clientX, e.clientY, r.domain + ' - ' + label, String(count));
+        });
+        seg.addEventListener('pointerleave', hideTooltip);
+        track.appendChild(seg);
+      });
+
+    const row = el('div', { className: 'chart-row' }, [
+      el('div', { className: 'label', textContent: r.domain, title: r.domain }),
+      track,
+      el('div', { className: 'total', textContent: String(r.total) }),
+    ]);
+    rowsWrap.appendChild(row);
+  });
+  wrap.appendChild(rowsWrap);
+  return wrap;
 }
 
 async function loadDetail(runId) {
@@ -162,43 +393,65 @@ async function loadDetail(runId) {
   const totalFailed = run.account_results.reduce((s, a) => s + (a.failed || 0), 0);
   const totalDup = run.account_results.reduce((s, a) => s + (a.duplicates || 0), 0);
 
-  detailPanel.innerHTML = `
-    <div class="stat-grid">
-      <div class="stat"><div class="n">${badge(run.status)}</div><div class="l">status</div></div>
-      <div class="stat"><div class="n">${run.domains_count ?? '-'}</div><div class="l">dominios Mailgun</div></div>
-      <div class="stat"><div class="n">${run.total_emails ?? '-'}</div><div class="l">e-mails unicos</div></div>
-      <div class="stat"><div class="n">${totalAdded}</div><div class="l">enviados Snov.io</div></div>
-      <div class="stat"><div class="n">${totalDup}</div><div class="l">duplicados</div></div>
-      <div class="stat"><div class="n">${totalFailed}</div><div class="l">falharam</div></div>
-    </div>
-    ${run.error ? `<p class="err-text">Erro: ${run.error}</p>` : ''}
+  detailPanel.innerHTML = '';
 
-    <h2>Supressoes por dominio (Mailgun)</h2>
-    ${domainRows.length ? `
-    <table>
-      <thead><tr><th>Dominio</th><th>Bounces</th><th>Complaints</th><th>Unsubscribes</th><th>Total</th></tr></thead>
-      <tbody>
-        ${domainRows.map(r => `
-          <tr><td>${r.domain}</td><td>${r.bounces||0}</td><td>${r.complaints||0}</td><td>${r.unsubscribes||0}</td><td>${r.total}</td></tr>
-        `).join('')}
-      </tbody>
-    </table>` : '<p class="muted">Nenhuma supressao com dominios afetados.</p>'}
+  const statGrid = el('div', { className: 'stat-grid' });
+  [
+    [badge(run.status), 'status', true],
+    [run.domains_count ?? '-', 'dominios Mailgun'],
+    [run.total_emails ?? '-', 'e-mails unicos'],
+    [totalAdded, 'enviados Snov.io'],
+    [totalDup, 'duplicados'],
+    [totalFailed, 'falharam'],
+  ].forEach(([n, l, isHtml]) => {
+    const nEl = el('div', { className: 'n' });
+    if (isHtml) nEl.innerHTML = n; else nEl.textContent = n;
+    statGrid.appendChild(el('div', { className: 'stat' }, [nEl, el('div', { className: 'l', textContent: l })]));
+  });
+  detailPanel.appendChild(statGrid);
 
-    <h2>Envio por conta Snov.io</h2>
-    ${run.account_results.length ? `
-    <table>
-      <thead><tr><th>Conta</th><th>List ID</th><th>Enviados</th><th>Duplicados</th><th>Falharam</th><th>Erro</th></tr></thead>
-      <tbody>
-        ${run.account_results.map(a => `
-          <tr>
-            <td>${a.account_label}</td><td>${a.list_id ?? '-'}</td>
-            <td>${a.added}</td><td>${a.duplicates}</td><td>${a.failed}</td>
-            <td class="err-text">${a.error ?? ''}</td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>` : '<p class="muted">Nenhum envio (dry-run ou sem contas).</p>'}
-  `;
+  if (run.error) {
+    detailPanel.appendChild(el('p', { className: 'err-text', textContent: 'Erro: ' + run.error }));
+  }
+
+  detailPanel.appendChild(el('h2', { textContent: 'Supressoes por dominio (Mailgun)' }));
+  if (domainRows.length) {
+    detailPanel.appendChild(renderDomainChart(domainRows));
+
+    const table = el('table');
+    const thead = el('thead', {}, [el('tr', {}, ['Dominio', 'Bounces', 'Complaints', 'Unsubscribes', 'Total'].map(h => el('th', { textContent: h })))]);
+    const tbody = el('tbody', {}, domainRows.map(r => el('tr', {}, [
+      el('td', { textContent: r.domain }),
+      el('td', { textContent: String(r.bounces || 0) }),
+      el('td', { textContent: String(r.complaints || 0) }),
+      el('td', { textContent: String(r.unsubscribes || 0) }),
+      el('td', { textContent: String(r.total) }),
+    ])));
+    table.appendChild(thead);
+    table.appendChild(tbody);
+    detailPanel.appendChild(table);
+  } else {
+    detailPanel.appendChild(el('p', { className: 'muted', textContent: 'Nenhuma supressao com dominios afetados.' }));
+  }
+
+  detailPanel.appendChild(el('h2', { textContent: 'Envio por conta Snov.io' }));
+  if (run.account_results.length) {
+    const table = el('table');
+    const thead = el('thead', {}, [el('tr', {}, ['Conta', 'List ID', 'Enviados', 'Duplicados', 'Falharam', 'Erro'].map(h => el('th', { textContent: h })))]);
+    const tbody = el('tbody', {}, run.account_results.map(a => el('tr', {}, [
+      el('td', { textContent: a.account_label }),
+      el('td', { textContent: a.list_id ?? '-' }),
+      el('td', { textContent: String(a.added) }),
+      el('td', { textContent: String(a.duplicates) }),
+      el('td', { textContent: String(a.failed) }),
+      el('td', { className: 'err-text', textContent: a.error ?? '' }),
+    ])));
+    table.appendChild(thead);
+    table.appendChild(tbody);
+    detailPanel.appendChild(table);
+  } else {
+    detailPanel.appendChild(el('p', { className: 'muted', textContent: 'Nenhum envio (dry-run ou sem contas).' }));
+  }
 }
 
 loadRuns();
