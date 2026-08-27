@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 import db
 
 app = FastAPI(title="Painel de Negativacao Mailgun -> Snov.io")
+db.init_db()
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
