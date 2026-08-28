@@ -1,14 +1,16 @@
 """
 Painel de acompanhamento das negativacoes (Mailgun -> Snov.io e
-SendGrid -> Snov.io). Mailgun: le o historico gravado localmente pelo
-negativacao_mailgun.py. SendGrid: pipeline irmao roda fora deste host
-(maquina local do usuario) e entrega cada execucao concluida via
-POST /api/sendgrid/ingest.
+SendGrid -> Snov.io). Le o historico gravado por negativacao_mailgun.py e
+negativacao_sendgrid.py no SQLite (db.py), e pode disparar os dois via
+POST /api/runs/trigger e /api/sendgrid/runs/trigger (mesmo processo/imagem,
+subprocess.Popen - o botao "Rodar agora" do painel usa isso).
 
 Uso:
     uvicorn app:app --host 0.0.0.0 --port 8080
 """
 import os
+import subprocess
+import sys
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
@@ -20,10 +22,15 @@ import db
 app = FastAPI(title="Painel de Negativacao Mailgun / SendGrid -> Snov.io")
 db.init_db()
 
-STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 SENDGRID_INGEST_API_KEY = os.getenv("SENDGRID_INGEST_API_KEY")
+
+
+def _has_running(runs):
+    return any(r["status"] == "running" for r in runs)
 
 
 @app.get("/", include_in_schema=False)
@@ -50,6 +57,14 @@ def api_get_run(run_id: int):
     return run
 
 
+@app.post("/api/runs/trigger")
+def api_trigger_run():
+    if _has_running(db.list_runs(limit=5)):
+        raise HTTPException(status_code=409, detail="Ja ha uma execucao Mailgun em andamento")
+    subprocess.Popen([sys.executable, "negativacao_mailgun.py"], cwd=BASE_DIR)
+    return {"status": "started"}
+
+
 @app.get("/api/sendgrid/runs")
 def api_list_sendgrid_runs(limit: int = 50):
     limit = max(1, min(limit, 500))
@@ -62,6 +77,21 @@ def api_get_sendgrid_run(run_id: int):
     if run is None:
         raise HTTPException(status_code=404, detail="Run nao encontrado")
     return run
+
+
+class SendgridTrigger(BaseModel):
+    todos: bool = False
+
+
+@app.post("/api/sendgrid/runs/trigger")
+def api_trigger_sendgrid_run(payload: SendgridTrigger = SendgridTrigger()):
+    if _has_running(db.list_sendgrid_runs(limit=5)):
+        raise HTTPException(status_code=409, detail="Ja ha uma execucao SendGrid em andamento")
+    cmd = [sys.executable, "negativacao_sendgrid.py"]
+    if payload.todos:
+        cmd.append("--todos")
+    subprocess.Popen(cmd, cwd=BASE_DIR)
+    return {"status": "started"}
 
 
 class SendgridDateBreakdown(BaseModel):

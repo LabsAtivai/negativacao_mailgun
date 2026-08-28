@@ -69,7 +69,38 @@
     padding: 20px 28px;
     border-bottom: 1px solid var(--border);
   }
-  .trend-section h2 { margin: 0 0 14px; }
+  .trend-section h2 { margin: 0; }
+  .trend-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .trend-header-actions { display: flex; align-items: center; gap: 12px; }
+  .todos-check {
+    font-size: 12px;
+    color: var(--muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .run-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .run-btn:hover { filter: brightness(1.1); }
+  .run-btn:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; filter: none; }
   .trend-chart-wrap { overflow-x: auto; padding-bottom: 4px; }
   .trend-chart {
     display: flex;
@@ -217,7 +248,10 @@
 
 <section class="tab-panel active" id="tab-mailgun">
   <section class="trend-section">
-    <h2>E-mails unicos por execucao (historico)</h2>
+    <div class="trend-header">
+      <h2>E-mails unicos por execucao (historico)</h2>
+      <button class="run-btn" id="run-btn-mailgun">Rodar agora</button>
+    </div>
     <div class="trend-chart-wrap">
       <div class="trend-chart" id="trend-chart-mailgun"><div class="empty">Carregando...</div></div>
     </div>
@@ -234,7 +268,13 @@
 
 <section class="tab-panel" id="tab-sendgrid">
   <section class="trend-section">
-    <h2>E-mails unicos por execucao (historico)</h2>
+    <div class="trend-header">
+      <h2>E-mails unicos por execucao (historico)</h2>
+      <div class="trend-header-actions">
+        <label class="todos-check"><input type="checkbox" id="todos-check-sendgrid"> todo o historico (--todos)</label>
+        <button class="run-btn" id="run-btn-sendgrid">Rodar agora</button>
+      </div>
+    </div>
     <div class="trend-chart-wrap">
       <div class="trend-chart" id="trend-chart-sendgrid"><div class="empty">Carregando...</div></div>
     </div>
@@ -324,7 +364,39 @@ function createDashboard(cfg) {
   const trendChart = document.getElementById('trend-chart-' + cfg.prefix);
   const runsPanel = document.getElementById('runs-panel-' + cfg.prefix);
   const detailPanel = document.getElementById('detail-panel-' + cfg.prefix);
+  const runBtn = document.getElementById('run-btn-' + cfg.prefix);
   let selectedRunId = null;
+
+  async function triggerRun() {
+    const todosCheck = document.getElementById('todos-check-' + cfg.prefix);
+    const todos = todosCheck ? todosCheck.checked : false;
+    if (!confirm(cfg.confirmMessage(todos))) return;
+
+    runBtn.disabled = true;
+    runBtn.textContent = 'Rodando...';
+    try {
+      const res = await fetch(cfg.triggerUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg.triggerBody ? cfg.triggerBody(todos) : {}),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert('Nao foi possivel iniciar: ' + (err.detail || res.status));
+        runBtn.disabled = false;
+        runBtn.textContent = 'Rodar agora';
+        return;
+      }
+    } catch (e) {
+      alert('Nao foi possivel iniciar: ' + e);
+      runBtn.disabled = false;
+      runBtn.textContent = 'Rodar agora';
+      return;
+    }
+    loadRuns();
+  }
+
+  runBtn.addEventListener('click', triggerRun);
 
   function renderTrendChart(runs) {
     if (!runs.length) {
@@ -361,6 +433,10 @@ function createDashboard(cfg) {
     lastRefresh.textContent = 'Atualizado ' + new Date().toLocaleTimeString('pt-BR');
 
     renderTrendChart(runs);
+
+    const running = runs.some(r => r.status === 'running');
+    runBtn.disabled = running;
+    runBtn.textContent = running ? 'Rodando...' : 'Rodar agora';
 
     if (runs.length === 0) {
       runsPanel.innerHTML = '<div class="empty">Nenhuma execucao ainda.</div>';
@@ -519,6 +595,8 @@ function createDashboard(cfg) {
 createDashboard({
   prefix: 'mailgun',
   apiBase: '/api/runs',
+  triggerUrl: '/api/runs/trigger',
+  confirmMessage: () => 'Rodar a negativacao Mailgun agora? Isso busca as supressoes atuais (bounces/complaints/unsubscribes) de todos os dominios e envia de verdade pra Lista de e-mails a nao enviar de TODAS as contas Snov.io ativas.',
   groupLabel: 'Dominio',
   breakdownTitle: 'Supressoes por dominio (Mailgun)',
   series: [
@@ -549,6 +627,11 @@ createDashboard({
 createDashboard({
   prefix: 'sendgrid',
   apiBase: '/api/sendgrid/runs',
+  triggerUrl: '/api/sendgrid/runs/trigger',
+  triggerBody: (todos) => ({ todos }),
+  confirmMessage: (todos) => todos
+    ? 'Rodar a negativacao SendGrid agora com --todos (TODO o historico de contatos inativos)? Envio real pra TODAS as contas Snov.io ativas.'
+    : 'Rodar a negativacao SendGrid agora (so o dia anterior)? Envio real pra TODAS as contas Snov.io ativas.',
   groupLabel: 'Data',
   breakdownTitle: 'Negativados por data (SendGrid)',
   series: [
