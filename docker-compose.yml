@@ -7,10 +7,21 @@ x-env: &env
   SNOVIO_RATE_LIMIT_PER_MIN: ${SNOVIO_RATE_LIMIT_PER_MIN:-60}
   PIPELINE_WORKERS: ${PIPELINE_WORKERS:-5}
   DB_PATH: ${DB_PATH:-/app/data/negativacao.db}
-  # Chave que o pipeline SendGrid (roda fora deste host) usa pra autenticar
-  # em POST /api/sendgrid/ingest. Gere um valor forte e compartilhe so com
-  # aquele script (header X-API-Key).
-  SENDGRID_INGEST_API_KEY: ${SENDGRID_INGEST_API_KEY}
+  # So usada se algum caller externo ainda entregar runs via
+  # POST /api/sendgrid/ingest (o negativacao_sendgrid.py deste stack grava
+  # direto no SQLite, nao precisa disso).
+  SENDGRID_INGEST_API_KEY: ${SENDGRID_INGEST_API_KEY:-}
+
+x-sendgrid-mysql-env: &sendgrid-mysql-env
+  DB_HOST: ${SENDGRID_DB_HOST}
+  DB_PORT: ${SENDGRID_DB_PORT:-3306}
+  DB_USER: ${SENDGRID_DB_USER}
+  DB_PASSWORD: ${SENDGRID_DB_PASSWORD}
+  DB_NAME: ${SENDGRID_DB_NAME}
+  DB_TABLE: ${SENDGRID_DB_TABLE}
+  DB_EMAIL_COLUMN: ${SENDGRID_DB_EMAIL_COLUMN:-email}
+  DB_ATIVO_COLUMN: ${SENDGRID_DB_ATIVO_COLUMN:-ativo}
+  DB_DATE_COLUMN: ${SENDGRID_DB_DATE_COLUMN:-data_alteracao}
 
 services:
   dashboard:
@@ -34,6 +45,22 @@ services:
     command: ["python", "negativacao_mailgun.py"]
     environment:
       <<: *env
+    volumes:
+      - negativacao_data:/app/data
+    networks:
+      - ativaai
+    profiles:
+      - manual
+
+  # Um-shot: mesma ideia do "negativacao" acima, so que pro pipeline
+  # SendGrid (contatos ativo=0 num MySQL). Dispare manualmente:
+  #   docker compose --profile manual run --rm negativacao_sendgrid [-- --todos]
+  # ou agende via cron do host chamando o mesmo comando.
+  negativacao_sendgrid:
+    build: .
+    command: ["python", "negativacao_sendgrid.py"]
+    environment:
+      <<: [*env, *sendgrid-mysql-env]
     volumes:
       - negativacao_data:/app/data
     networks:

@@ -167,6 +167,50 @@ def get_run(run_id):
         return result
 
 
+def sendgrid_start_run(mode=None, desde=None, ate=None, dry_run=False):
+    """Inicia um run do pipeline SendGrid rodando neste mesmo processo
+    (negativacao_sendgrid.py). Grava direto - sem HTTP, sem ingest."""
+    init_db()
+    with contextlib.closing(_connect()) as conn:
+        cur = conn.execute(
+            """INSERT INTO sendgrid_runs (started_at, status, dry_run, mode, desde, ate)
+               VALUES (datetime('now'), 'running', ?, ?, ?, ?)""",
+            (1 if dry_run else 0, mode, desde, ate),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def sendgrid_record_date_breakdown(run_id, date, count):
+    with contextlib.closing(_connect()) as conn:
+        conn.execute(
+            "INSERT INTO sendgrid_date_breakdown (run_id, date, count) VALUES (?, ?, ?)",
+            (run_id, date, count),
+        )
+        conn.commit()
+
+
+def sendgrid_record_account_result(run_id, account_label, list_id, added, duplicates, failed, error=None):
+    with contextlib.closing(_connect()) as conn:
+        conn.execute(
+            """INSERT INTO sendgrid_account_results
+               (run_id, account_label, list_id, added, duplicates, failed, error)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, account_label, str(list_id) if list_id is not None else None, added, duplicates, failed, error),
+        )
+        conn.commit()
+
+
+def sendgrid_finish_run(run_id, status, total_emails=None, error=None):
+    with contextlib.closing(_connect()) as conn:
+        conn.execute(
+            """UPDATE sendgrid_runs SET finished_at = datetime('now'), status = ?,
+               total_emails = ?, error = ? WHERE id = ?""",
+            (status, total_emails, error, run_id),
+        )
+        conn.commit()
+
+
 def ingest_sendgrid_run(payload):
     """Grava uma execucao ja concluida do pipeline SendGrid (entregue via
     POST /api/sendgrid/ingest), com seus filhos date_breakdown/account_results
