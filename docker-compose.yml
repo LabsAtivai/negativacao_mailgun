@@ -7,6 +7,7 @@ x-env: &env
   SNOVIO_RATE_LIMIT_PER_MIN: ${SNOVIO_RATE_LIMIT_PER_MIN:-60}
   PIPELINE_WORKERS: ${PIPELINE_WORKERS:-5}
   DB_PATH: ${DB_PATH:-/app/data/negativacao.db}
+  SENDGRID_DB_PATH: ${SENDGRID_DB_PATH:-/app/data-sendgrid/negativacao.db}
 
 services:
   dashboard:
@@ -18,6 +19,10 @@ services:
       <<: *env
     volumes:
       - negativacao_data:/app/data
+      # SQLite gravado pelo pipeline separado de negativacao SendGrid
+      # (repo C:\Users\HP\relatorios\negativação). Somente leitura aqui -
+      # quem grava e o outro projeto, direto no host.
+      - ${SENDGRID_DATA_DIR:-./data-sendgrid}:/app/data-sendgrid:ro
     networks:
       - ativaai
 

@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import db
+import db_sendgrid
 
 app = FastAPI(title="Painel de Negativacao Mailgun -> Snov.io")
 db.init_db()
@@ -40,6 +41,20 @@ def api_list_runs(limit: int = 50):
 @app.get("/api/runs/{run_id}")
 def api_get_run(run_id: int):
     run = db.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run nao encontrado")
+    return run
+
+
+@app.get("/api/sendgrid/runs")
+def api_list_sendgrid_runs(limit: int = 50):
+    limit = max(1, min(limit, 500))
+    return db_sendgrid.list_runs(limit=limit)
+
+
+@app.get("/api/sendgrid/runs/{run_id}")
+def api_get_sendgrid_run(run_id: int):
+    run = db_sendgrid.get_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run nao encontrado")
     return run
