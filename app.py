@@ -35,10 +35,12 @@ SENDGRID_INGEST_API_KEY = os.getenv("SENDGRID_INGEST_API_KEY")
 POSTAL_WEBHOOK_SECRET = os.getenv("POSTAL_WEBHOOK_SECRET")
 
 # Status events (payload com "message"+"status") que indicam e-mail ruim.
-# Chave = valor curto do campo "status" no body (ex: "status":"DeliveryFailed"),
-# igual ao nome do evento (header X-Postal-Event) sem o prefixo "Message".
+# Chave = valor real do campo "status" no body. O Postal NAO manda header
+# X-Postal-Event, e o enum real do campo "status" e Sent/SoftFail/HardFail/
+# Held (SoftFail = falha temporaria, ainda tentando retry - nao negativa;
+# HardFail = desistiu de vez apos esgotar as tentativas - negativa).
 POSTAL_STATUS_KIND_MAP = {
-    "DeliveryFailed": "delivery_failed",
+    "HardFail": "delivery_failed",
     "Held": "held",
 }
 
@@ -184,21 +186,20 @@ async def api_postal_webhook(request: Request, key: str | None = None):
         raise HTTPException(status_code=401, detail="key invalida ou ausente")
 
     payload = await request.json()
-    event_name = request.headers.get("X-Postal-Event")
-    short_name = event_name[len("Message"):] if event_name and event_name.startswith("Message") else event_name
 
-    is_bounce = short_name == "Bounced" if short_name else "bounce" in payload
-    if is_bounce:
+    # Bounce event: payload proprio, com "original_message" + "bounce" (sem
+    # campo "status"). O Postal nao manda header X-Postal-Event, entao o
+    # tipo de evento e deduzido so pelo formato do body.
+    if "bounce" in payload:
         recipient = (payload.get("original_message") or {}).get("to")
         token = (payload.get("bounce") or {}).get("token")
         if recipient:
             db.record_postal_event("bounced", recipient, status="Bounced", message_token=token)
         return {"status": "ok"}
 
-    # Status event: usa o header (curto, sem "Message") se veio, senao o
-    # proprio campo "status" do body (ex: {"status": "DeliveryFailed", ...}).
-    status_value = short_name or payload.get("status")
-    kind = POSTAL_STATUS_KIND_MAP.get(status_value)
+    # Status event: {"message": {...}, "status": "Sent"|"SoftFail"|"HardFail"|"Held", ...}.
+    # SoftFail = falha temporaria (ainda em retry) - nao negativa.
+    kind = POSTAL_STATUS_KIND_MAP.get(payload.get("status"))
     if kind:
         message = payload.get("message") or {}
         recipient = message.get("to")
