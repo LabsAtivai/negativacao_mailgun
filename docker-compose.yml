@@ -11,6 +11,9 @@ x-env: &env
   # POST /api/sendgrid/ingest (o negativacao_sendgrid.py deste stack grava
   # direto no SQLite, nao precisa disso).
   SENDGRID_INGEST_API_KEY: ${SENDGRID_INGEST_API_KEY:-}
+  # Chave exigida em POST /api/postal/webhook?key=... (configurada no admin
+  # do Postal, na URL do webhook do servidor).
+  POSTAL_WEBHOOK_SECRET: ${POSTAL_WEBHOOK_SECRET:-}
 
 x-sendgrid-mysql-env: &sendgrid-mysql-env
   DB_HOST: ${SENDGRID_DB_HOST}
@@ -61,6 +64,24 @@ services:
     command: ["python", "negativacao_sendgrid.py"]
     environment:
       <<: [*env, *sendgrid-mysql-env]
+    volumes:
+      - negativacao_data:/app/data
+    networks:
+      - ativaai
+    profiles:
+      - manual
+
+  # Um-shot: mesma ideia dos dois acima, so que pro pipeline Postal. Nao ha
+  # nada pra "puxar" de fora - so consome os eventos de webhook ja recebidos
+  # pelo servico "dashboard" (POST /api/postal/webhook) e gravados no SQLite
+  # compartilhado. Dispare manualmente:
+  #   docker compose --profile manual run --rm negativacao_postal [-- --todos]
+  # ou agende via cron do host (roda so os eventos novos por padrao).
+  negativacao_postal:
+    build: .
+    command: ["python", "negativacao_postal.py"]
+    environment:
+      <<: *env
     volumes:
       - negativacao_data:/app/data
     networks:
