@@ -187,18 +187,19 @@ async def api_postal_webhook(request: Request, key: str | None = None):
     if not key or not hmac.compare_digest(key, POSTAL_WEBHOOK_SECRET):
         raise HTTPException(status_code=401, detail="key invalida ou ausente")
 
-    payload = await request.json()
+    envelope = await request.json()
 
-    # DEBUG TEMPORARIO: eventos reais do Postal (MessageDeliveryFailed/Held/
-    # Bounced) nao estao sendo gravados mesmo respondendo 200 - log pra
-    # capturar o formato real do body em producao. Remover depois de achar
-    # a causa.
-    print(f"[postal-webhook-debug] top-level keys: {list(payload.keys())}", flush=True)
-    print(f"[postal-webhook-debug] body: {payload}", flush=True)
+    # Postal 3.x envelopa o body real: {"event": "...", "timestamp": ...,
+    # "payload": {...formato documentado (message/status ou
+    # original_message/bounce)...}, "uuid": ...}. A doc original (e o campo
+    # "Payload" exibido no admin do Postal) so mostra o conteudo de dentro
+    # de "payload" - sem desembrulhar isso aqui, todo evento real cai no
+    # branch de "irrelevante" e nada e gravado, mesmo respondendo 200.
+    inner = envelope.get("payload")
+    payload = inner if isinstance(inner, dict) else envelope
 
     # Bounce event: payload proprio, com "original_message" + "bounce" (sem
-    # campo "status"). O Postal nao manda header X-Postal-Event, entao o
-    # tipo de evento e deduzido so pelo formato do body.
+    # campo "status").
     if "bounce" in payload:
         recipient = (payload.get("original_message") or {}).get("to")
         token = (payload.get("bounce") or {}).get("token")
