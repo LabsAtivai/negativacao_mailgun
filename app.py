@@ -17,6 +17,8 @@ import os
 import subprocess
 import sys
 
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -209,3 +211,40 @@ async def api_postal_webhook(request: Request, key: str | None = None):
     # Eventos irrelevantes (MessageSent, MessageDelayed, MessageLoaded,
     # MessageLinkClicked, DomainDNSError, ...) sao so confirmados, sem gravar nada.
     return {"status": "ok"}
+
+
+# ==============================================================================
+# Agendamento diario (01h por padrao) dos tres pipelines, direto no processo
+# do painel - nao depende de cron externo no host. Mesma logica de
+# "bloqueia se ja ha run em andamento" + subprocess.Popen dos botoes
+# "Rodar agora" manuais.
+# ==============================================================================
+
+SCHEDULE_TIMEZONE = os.getenv("SCHEDULE_TIMEZONE", "America/Sao_Paulo")
+SCHEDULE_HOUR = int(os.getenv("SCHEDULE_HOUR", "1"))
+SCHEDULE_MINUTE = int(os.getenv("SCHEDULE_MINUTE", "0"))
+
+
+def _run_scheduled_pipeline(cmd, list_runs_fn, label):
+    if _has_running(list_runs_fn(limit=5)):
+        print(f"[scheduler] {label}: ja ha uma execucao em andamento, pulando a execucao agendada.")
+        return
+    print(f"[scheduler] {label}: iniciando execucao agendada ({SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} {SCHEDULE_TIMEZONE}).")
+    subprocess.Popen(cmd, cwd=BASE_DIR)
+
+
+scheduler = BackgroundScheduler(timezone=SCHEDULE_TIMEZONE)
+_cron = CronTrigger(hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE, timezone=SCHEDULE_TIMEZONE)
+scheduler.add_job(
+    lambda: _run_scheduled_pipeline([sys.executable, "negativacao_mailgun.py"], db.list_runs, "Mailgun"),
+    _cron, id="mailgun_nightly", replace_existing=True,
+)
+scheduler.add_job(
+    lambda: _run_scheduled_pipeline([sys.executable, "negativacao_sendgrid.py"], db.list_sendgrid_runs, "SendGrid"),
+    _cron, id="sendgrid_nightly", replace_existing=True,
+)
+scheduler.add_job(
+    lambda: _run_scheduled_pipeline([sys.executable, "negativacao_postal.py"], db.list_postal_runs, "Postal"),
+    _cron, id="postal_nightly", replace_existing=True,
+)
+scheduler.start()
