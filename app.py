@@ -189,6 +189,13 @@ async def api_postal_webhook(request: Request, key: str | None = None):
 
     payload = await request.json()
 
+    # DEBUG TEMPORARIO: eventos reais do Postal (MessageDeliveryFailed/Held/
+    # Bounced) nao estao sendo gravados mesmo respondendo 200 - log pra
+    # capturar o formato real do body em producao. Remover depois de achar
+    # a causa.
+    print(f"[postal-webhook-debug] top-level keys: {list(payload.keys())}", flush=True)
+    print(f"[postal-webhook-debug] body: {payload}", flush=True)
+
     # Bounce event: payload proprio, com "original_message" + "bounce" (sem
     # campo "status"). O Postal nao manda header X-Postal-Event, entao o
     # tipo de evento e deduzido so pelo formato do body.
