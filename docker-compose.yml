@@ -29,6 +29,7 @@ x-sendgrid-mysql-env: &sendgrid-mysql-env
   DB_EMAIL_COLUMN: ${SENDGRID_DB_EMAIL_COLUMN:-email}
   DB_ATIVO_COLUMN: ${SENDGRID_DB_ATIVO_COLUMN:-ativo}
   DB_DATE_COLUMN: ${SENDGRID_DB_DATE_COLUMN:-data_alteracao}
+  DB_MOTIVO_COLUMN: ${SENDGRID_DB_MOTIVO_COLUMN:-motivo_negativacao}
 
 services:
   dashboard:

@@ -114,6 +114,7 @@ def api_trigger_sendgrid_run(payload: SendgridTrigger = SendgridTrigger()):
 
 class SendgridDateBreakdown(BaseModel):
     date: str
+    kind: str | None = None
     count: int
 
 

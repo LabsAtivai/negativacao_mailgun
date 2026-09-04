@@ -129,15 +129,26 @@ def get_inactive_emails(limit=None, only_yesterday=False, desde=None, ate=None):
 
 
 def get_inactive_email_date_breakdown(only_yesterday=False, desde=None, ate=None):
+    """Agrupa por (data, motivo) - motivo vem da coluna que o workflow n8n
+    (SendGrid -> MySQL) grava com o evento SendGrid original (bounce, block,
+    spamreport, invalids, dropped, ...). Registros antigos sem motivo
+    gravado (coluna NULL/vazia) caem em "outros"."""
     table = env("DB_TABLE")
     ativo_col = env("DB_ATIVO_COLUMN", default="ativo")
     date_col = env("DB_DATE_COLUMN", default="data_alteracao")
-    _validate_identifiers((table, "DB_TABLE"), (ativo_col, "DB_ATIVO_COLUMN"), (date_col, "DB_DATE_COLUMN"))
+    motivo_col = env("DB_MOTIVO_COLUMN", default="motivo_negativacao")
+    _validate_identifiers(
+        (table, "DB_TABLE"), (ativo_col, "DB_ATIVO_COLUMN"),
+        (date_col, "DB_DATE_COLUMN"), (motivo_col, "DB_MOTIVO_COLUMN"),
+    )
 
     conn = _mysql_connect()
     try:
         cursor = conn.cursor()
-        query = f"SELECT DATE(`{date_col}`) AS d, COUNT(*) FROM `{table}` WHERE `{ativo_col}` = 0"
+        query = (
+            f"SELECT DATE(`{date_col}`) AS d, COALESCE(NULLIF(`{motivo_col}`, ''), 'outros') AS motivo, "
+            f"COUNT(*) FROM `{table}` WHERE `{ativo_col}` = 0"
+        )
         params_list = []
         if only_yesterday:
             query += f" AND DATE(`{date_col}`) = CURDATE() - INTERVAL 1 DAY"
@@ -148,9 +159,9 @@ def get_inactive_email_date_breakdown(only_yesterday=False, desde=None, ate=None
             if ate:
                 query += f" AND DATE(`{date_col}`) <= %s"
                 params_list.append(ate)
-        query += " GROUP BY d ORDER BY d"
+        query += " GROUP BY d, motivo ORDER BY d, motivo"
         cursor.execute(query, tuple(params_list))
-        breakdown = [(str(d), count) for d, count in cursor.fetchall() if d is not None]
+        breakdown = [(str(d), motivo, count) for d, motivo, count in cursor.fetchall() if d is not None]
         cursor.close()
         return breakdown
     finally:
@@ -425,8 +436,8 @@ def main():
         emails = get_inactive_emails(limit=args.limit, only_yesterday=only_yesterday, desde=args.desde, ate=args.ate)
 
         date_breakdown = get_inactive_email_date_breakdown(only_yesterday=only_yesterday, desde=args.desde, ate=args.ate)
-        for date, count in date_breakdown:
-            db.sendgrid_record_date_breakdown(run_id, date, count)
+        for date, motivo, count in date_breakdown:
+            db.sendgrid_record_date_breakdown(run_id, date, motivo, count)
 
         if not emails:
             print("Nenhum contato com ativo=0 encontrado. Nada a fazer.")

@@ -143,9 +143,18 @@ def _connect():
     return conn
 
 
+def _ensure_column(conn, table, column, coltype):
+    """Adiciona coluna a uma tabela ja existente se ela ainda nao tiver -
+    CREATE TABLE IF NOT EXISTS no SCHEMA nao altera tabelas ja criadas."""
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+
+
 def init_db():
     with contextlib.closing(_connect()) as conn:
         conn.executescript(SCHEMA)
+        _ensure_column(conn, "sendgrid_date_breakdown", "kind", "TEXT")
         conn.commit()
 
 
@@ -232,11 +241,11 @@ def sendgrid_start_run(mode=None, desde=None, ate=None, dry_run=False):
         return cur.lastrowid
 
 
-def sendgrid_record_date_breakdown(run_id, date, count):
+def sendgrid_record_date_breakdown(run_id, date, kind, count):
     with contextlib.closing(_connect()) as conn:
         conn.execute(
-            "INSERT INTO sendgrid_date_breakdown (run_id, date, count) VALUES (?, ?, ?)",
-            (run_id, date, count),
+            "INSERT INTO sendgrid_date_breakdown (run_id, date, kind, count) VALUES (?, ?, ?, ?)",
+            (run_id, date, kind, count),
         )
         conn.commit()
 
@@ -288,8 +297,8 @@ def ingest_sendgrid_run(payload):
 
         for d in payload.get("date_breakdown", []):
             conn.execute(
-                "INSERT INTO sendgrid_date_breakdown (run_id, date, count) VALUES (?, ?, ?)",
-                (run_id, d["date"], d["count"]),
+                "INSERT INTO sendgrid_date_breakdown (run_id, date, kind, count) VALUES (?, ?, ?, ?)",
+                (run_id, d["date"], d.get("kind"), d["count"]),
             )
 
         for a in payload.get("account_results", []):
@@ -326,7 +335,7 @@ def get_sendgrid_run(run_id):
         if not run:
             return None
         dates = conn.execute(
-            "SELECT date, count FROM sendgrid_date_breakdown WHERE run_id = ? ORDER BY date",
+            "SELECT date, kind, count FROM sendgrid_date_breakdown WHERE run_id = ? ORDER BY date, kind",
             (run_id,),
         ).fetchall()
         accounts = conn.execute(

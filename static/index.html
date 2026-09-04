@@ -19,6 +19,8 @@
     --series-1: #3987e5; /* bounces / sendgrid inativos */
     --series-2: #d95926; /* complaints */
     --series-3: #199e70; /* unsubscribes */
+    --series-4: #9c6ade; /* sendgrid: invalids */
+    --series-5: #e0457b; /* sendgrid: dropped */
   }
   * { box-sizing: border-box; }
   body {
@@ -647,7 +649,8 @@ createDashboard({
   },
 });
 
-// ---- SendGrid: breakdown por data, 1 serie (inativos - sem conceito de dominio) ----
+// ---- SendGrid: breakdown por data + motivo (evento SendGrid original:
+// bounce/block/spamreport/invalids/dropped, gravado pelo workflow n8n) ----
 createDashboard({
   prefix: 'sendgrid',
   apiBase: '/api/sendgrid/runs',
@@ -657,9 +660,13 @@ createDashboard({
     ? 'Rodar a negativacao SendGrid agora com --todos (TODO o historico de contatos inativos)? Envio real pra TODAS as contas Snov.io ativas.'
     : 'Rodar a negativacao SendGrid agora (so o dia anterior)? Envio real pra TODAS as contas Snov.io ativas.',
   groupLabel: 'Data',
-  breakdownTitle: 'Negativados por data (SendGrid)',
+  breakdownTitle: 'Negativados por data e motivo (SendGrid)',
   series: [
-    { key: 'count', color: 'var(--series-1)', label: 'Inativos' },
+    { key: 'bounce', color: 'var(--series-1)', label: 'Bounce' },
+    { key: 'block', color: 'var(--series-2)', label: 'Block' },
+    { key: 'spamreport', color: 'var(--series-3)', label: 'Spam report' },
+    { key: 'invalids', color: 'var(--series-4)', label: 'Invalids' },
+    { key: 'dropped', color: 'var(--series-5)', label: 'Dropped' },
   ],
   runSummaryLine: (r) => `${r.mode ?? '-'} · ${r.total_emails ?? '-'} e-mails`,
   extraStats: (run) => [
@@ -667,8 +674,18 @@ createDashboard({
     [`${run.desde ?? '-'} → ${run.ate ?? '-'}`, 'periodo'],
   ],
   buildBreakdownRows: (run) => {
-    return (run.date_breakdown || [])
-      .map(d => ({ label: d.date, counts: { count: d.count }, total: d.count }))
+    const totals = {};
+    (run.date_breakdown || []).forEach(d => {
+      totals[d.date] = totals[d.date] || {};
+      const kind = d.kind || 'outros';
+      totals[d.date][kind] = (totals[d.date][kind] || 0) + d.count;
+    });
+    return Object.entries(totals)
+      .map(([date, counts]) => ({
+        label: date,
+        counts,
+        total: Object.values(counts).reduce((a, b) => a + b, 0),
+      }))
       .sort((a, b) => a.label.localeCompare(b.label));
   },
 });
