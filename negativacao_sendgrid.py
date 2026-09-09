@@ -1,10 +1,16 @@
 """
-Le contatos do MySQL (base que o webhook-api de supressoes SendGrid
-mantem) e envia quem esta com ativo=0 (bounces/blocks/spam reports que
-marcaram o contato como inativo) para a Lista de e-mails a nao enviar
-(negativacao) de TODAS as contas Snov.io ativas cadastradas no
-snov-am-api - mesma fonte de contas que o negativacao_mailgun.py usa,
-via CREDENTIALS_API_URL/CREDENTIALS_API_KEY.
+Bounces/blocks/invalidos/spam reports vem direto da API de Suppressions do
+SendGrid (GET /v3/suppression/{bounces,blocks,invalid_emails,spam_reports}) -
+fonte autoritativa do proprio SendGrid, sem depender de nenhum mapeamento
+externo. "dropped" nao tem endpoint de pull no SendGrid (so chega via Event
+Webhook), entao esse continua vindo do MySQL (base que o webhook-api de
+supressoes mantem via workflow n8n), filtrado so por motivo_negativacao =
+"dropped".
+
+As duas fontes sao unidas e enviadas para a Lista de e-mails a nao enviar
+(negativacao) de TODAS as contas Snov.io ativas cadastradas no snov-am-api -
+mesma fonte de contas que o negativacao_mailgun.py usa, via
+CREDENTIALS_API_URL/CREDENTIALS_API_KEY.
 
 Uso:
     python negativacao_sendgrid.py --dry-run   # so mostra contagens, nada enviado
@@ -19,7 +25,9 @@ import os
 import re
 import sys
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from zoneinfo import ZoneInfo
 
 import mysql.connector
 import requests
@@ -61,6 +69,18 @@ TOKEN_REFRESH_SECONDS = 3000
 # para sempre, pois requests nao tem timeout por padrao.
 HTTP_TIMEOUT = (10, 30)
 
+SENDGRID_API_BASE = "https://api.sendgrid.com/v3"
+# motivo (usado no breakdown/painel) -> endpoint de Suppressions do SendGrid
+SUPPRESSION_ENDPOINTS = {
+    "bounce": "bounces",
+    "block": "blocks",
+    "invalido": "invalid_emails",
+    "spamreport": "spam_reports",
+}
+# Mesmo fuso do agendamento diario (SCHEDULE_TIMEZONE) - define os limites de
+# "dia anterior" tanto pra API do SendGrid quanto pro filtro no MySQL.
+TZ = ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "America/Sao_Paulo"))
+
 
 def env(name, required=True, default=None):
     value = os.getenv(name, default)
@@ -91,16 +111,19 @@ def _validate_identifiers(*pairs):
             sys.exit(f"Valor invalido em {label}: {identifier!r}")
 
 
-def get_inactive_emails(limit=None, only_yesterday=False, desde=None, ate=None):
+def get_inactive_emails(limit=None, only_yesterday=False, desde=None, ate=None, motivo=None):
     table = env("DB_TABLE")
     email_col = env("DB_EMAIL_COLUMN", default="email")
     ativo_col = env("DB_ATIVO_COLUMN", default="ativo")
     needs_date_col = only_yesterday or desde or ate
     date_col = env("DB_DATE_COLUMN", required=needs_date_col, default="data_alteracao")
+    motivo_col = env("DB_MOTIVO_COLUMN", required=motivo is not None, default="motivo_negativacao")
 
     pairs = [(table, "DB_TABLE"), (email_col, "DB_EMAIL_COLUMN"), (ativo_col, "DB_ATIVO_COLUMN")]
     if needs_date_col:
         pairs.append((date_col, "DB_DATE_COLUMN"))
+    if motivo is not None:
+        pairs.append((motivo_col, "DB_MOTIVO_COLUMN"))
     _validate_identifiers(*pairs)
 
     conn = _mysql_connect()
@@ -108,6 +131,9 @@ def get_inactive_emails(limit=None, only_yesterday=False, desde=None, ate=None):
         cursor = conn.cursor()
         query = f"SELECT `{email_col}` FROM `{table}` WHERE `{ativo_col}` = 0"
         params_list = []
+        if motivo is not None:
+            query += f" AND `{motivo_col}` = %s"
+            params_list.append(motivo)
         if only_yesterday:
             query += f" AND DATE(`{date_col}`) = CURDATE() - INTERVAL 1 DAY"
         elif desde or ate:
@@ -128,11 +154,11 @@ def get_inactive_emails(limit=None, only_yesterday=False, desde=None, ate=None):
         conn.close()
 
 
-def get_inactive_email_date_breakdown(only_yesterday=False, desde=None, ate=None):
+def get_inactive_email_date_breakdown(only_yesterday=False, desde=None, ate=None, motivo=None):
     """Agrupa por (data, motivo) - motivo vem da coluna que o workflow n8n
-    (SendGrid -> MySQL) grava com o evento SendGrid original (bounce, block,
-    spamreport, invalids, dropped, ...). Registros antigos sem motivo
-    gravado (coluna NULL/vazia) caem em "outros"."""
+    (SendGrid -> MySQL) grava com o evento SendGrid original. Registros
+    antigos sem motivo gravado (coluna NULL/vazia) caem em "outros". Passe
+    motivo= pra restringir a um motivo especifico (ex: "dropped")."""
     table = env("DB_TABLE")
     ativo_col = env("DB_ATIVO_COLUMN", default="ativo")
     date_col = env("DB_DATE_COLUMN", default="data_alteracao")
@@ -150,6 +176,9 @@ def get_inactive_email_date_breakdown(only_yesterday=False, desde=None, ate=None
             f"COUNT(*) FROM `{table}` WHERE `{ativo_col}` = 0"
         )
         params_list = []
+        if motivo is not None:
+            query += f" AND `{motivo_col}` = %s"
+            params_list.append(motivo)
         if only_yesterday:
             query += f" AND DATE(`{date_col}`) = CURDATE() - INTERVAL 1 DAY"
         elif desde or ate:
@@ -161,11 +190,113 @@ def get_inactive_email_date_breakdown(only_yesterday=False, desde=None, ate=None
                 params_list.append(ate)
         query += " GROUP BY d, motivo ORDER BY d, motivo"
         cursor.execute(query, tuple(params_list))
-        breakdown = [(str(d), motivo, count) for d, motivo, count in cursor.fetchall() if d is not None]
+        breakdown = [(str(d), motivo_val, count) for d, motivo_val, count in cursor.fetchall() if d is not None]
         cursor.close()
         return breakdown
     finally:
         conn.close()
+
+
+# ==============================================================================
+# SendGrid: Suppressions API direta (bounces/blocks/invalid_emails/spam_reports)
+# ==============================================================================
+
+
+def _window_bounds(only_yesterday, desde, ate):
+    """Limites (inicio inclusive, fim exclusivo) da janela, em TZ. None/None
+    = sem limite (modo --todos)."""
+    if only_yesterday:
+        today = datetime.datetime.now(TZ).date()
+        start = datetime.datetime.combine(today - datetime.timedelta(days=1), datetime.time.min, tzinfo=TZ)
+        end = datetime.datetime.combine(today, datetime.time.min, tzinfo=TZ)
+        return start, end
+    if desde or ate:
+        start = (
+            datetime.datetime.combine(datetime.date.fromisoformat(desde), datetime.time.min, tzinfo=TZ)
+            if desde else None
+        )
+        end = (
+            datetime.datetime.combine(
+                datetime.date.fromisoformat(ate) + datetime.timedelta(days=1), datetime.time.min, tzinfo=TZ
+            )
+            if ate else None
+        )
+        return start, end
+    return None, None
+
+
+def fetch_suppression_type(api_key, motivo, start_dt, end_dt, page_limit=500):
+    endpoint = SUPPRESSION_ENDPOINTS[motivo]
+    params = {"limit": page_limit, "offset": 0}
+    if start_dt:
+        params["start_time"] = int(start_dt.timestamp())
+    if end_dt:
+        params["end_time"] = int(end_dt.timestamp())
+
+    results = []
+    offset = 0
+    while True:
+        params["offset"] = offset
+        resp = None
+        for attempt in range(1, MAX_RETRIES_PER_BATCH + 1):
+            try:
+                resp = requests.get(
+                    f"{SENDGRID_API_BASE}/suppression/{endpoint}",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    params=params,
+                    timeout=HTTP_TIMEOUT,
+                )
+            except requests.exceptions.RequestException as exc:
+                backoff = min(60, 2**attempt)
+                print(
+                    f"[sendgrid-api:{motivo}] falha de conexao ({exc}), "
+                    f"tentativa {attempt}/{MAX_RETRIES_PER_BATCH}. Aguardando {backoff:.0f}s..."
+                )
+                time.sleep(backoff)
+                continue
+            if resp.status_code == 429 or resp.status_code >= 500:
+                backoff = min(60, 2**attempt)
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        backoff = max(backoff, float(retry_after))
+                    except ValueError:
+                        pass
+                print(
+                    f"[sendgrid-api:{motivo}] HTTP {resp.status_code}, "
+                    f"tentativa {attempt}/{MAX_RETRIES_PER_BATCH}. Aguardando {backoff:.0f}s..."
+                )
+                time.sleep(backoff)
+                continue
+            resp.raise_for_status()
+            break
+        else:
+            raise RuntimeError(f"Falha ao consultar suppression/{endpoint} apos {MAX_RETRIES_PER_BATCH} tentativas.")
+
+        page = resp.json()
+        results.extend(page)
+        if len(page) < page_limit:
+            break
+        offset += page_limit
+
+    return results
+
+
+def fetch_all_suppressions(api_key, start_dt, end_dt):
+    """Retorna [(email, motivo, data_str), ...] das 4 categorias direto da
+    Suppressions API do SendGrid (bounces/blocks/invalid_emails/spam_reports)."""
+    rows = []
+    for motivo in SUPPRESSION_ENDPOINTS:
+        entries = fetch_suppression_type(api_key, motivo, start_dt, end_dt)
+        for entry in entries:
+            email = entry.get("email")
+            if not email:
+                continue
+            created = entry.get("created")
+            date_str = datetime.datetime.fromtimestamp(created, tz=TZ).date().isoformat() if created else None
+            rows.append((email, motivo, date_str))
+        print(f"[sendgrid-api] {motivo}: {len(entries)} registro(s).")
+    return rows
 
 
 # ==============================================================================
@@ -419,6 +550,7 @@ def main():
 
     credentials_api_url = env("CREDENTIALS_API_URL").rstrip("/")
     credentials_api_key = env("CREDENTIALS_API_KEY")
+    sendgrid_api_key = env("SENDGRID_API_KEY")
     batch_size = int(env("SNOVIO_BATCH_SIZE", default="100"))
 
     run_id = db.sendgrid_start_run(mode=mode, desde=args.desde, ate=args.ate, dry_run=args.dry_run)
@@ -427,20 +559,40 @@ def main():
     try:
         if use_range:
             periodo = f"{args.desde or '...'} ate {args.ate or '...'}"
-            print(f"Buscando contatos inativos (ativo=0) no periodo {periodo} no banco de dados...")
+            print(f"Periodo: {periodo}")
         elif only_yesterday:
-            print("Buscando contatos inativos (ativo=0) do dia anterior no banco de dados...")
+            print("Periodo: dia anterior")
         else:
-            print("Buscando todos os contatos inativos (ativo=0) no banco de dados...")
+            print("Periodo: todo o historico")
 
-        emails = get_inactive_emails(limit=args.limit, only_yesterday=only_yesterday, desde=args.desde, ate=args.ate)
+        print("Buscando bounces/blocks/invalidos/spam reports direto na Suppressions API do SendGrid...")
+        start_dt, end_dt = _window_bounds(only_yesterday, args.desde, args.ate)
+        api_rows = fetch_all_suppressions(sendgrid_api_key, start_dt, end_dt)
 
-        date_breakdown = get_inactive_email_date_breakdown(only_yesterday=only_yesterday, desde=args.desde, ate=args.ate)
-        for date, motivo, count in date_breakdown:
-            db.sendgrid_record_date_breakdown(run_id, date, motivo, count)
+        print("Buscando 'dropped' (ativo=0, motivo=dropped) no banco de dados...")
+        dropped_emails = get_inactive_emails(
+            limit=args.limit, only_yesterday=only_yesterday, desde=args.desde, ate=args.ate, motivo="dropped",
+        )
+        dropped_breakdown = get_inactive_email_date_breakdown(
+            only_yesterday=only_yesterday, desde=args.desde, ate=args.ate, motivo="dropped",
+        )
+        print(f"dropped: {len(dropped_emails)} registro(s).\n")
+
+        breakdown_counts = defaultdict(int)
+        for _email, motivo_kind, date_str in api_rows:
+            if date_str:
+                breakdown_counts[(date_str, motivo_kind)] += 1
+        for date_str, motivo_kind, count in dropped_breakdown:
+            breakdown_counts[(date_str, motivo_kind)] += count
+        for (date_str, motivo_kind), count in sorted(breakdown_counts.items()):
+            db.sendgrid_record_date_breakdown(run_id, date_str, motivo_kind, count)
+
+        emails = sorted({email for email, _motivo, _date in api_rows} | set(dropped_emails))
+        if args.limit:
+            emails = emails[: args.limit]
 
         if not emails:
-            print("Nenhum contato com ativo=0 encontrado. Nada a fazer.")
+            print("Nenhuma supressao encontrada no periodo. Nada a fazer.")
             db.sendgrid_finish_run(run_id, status="completed", total_emails=0)
             return
 
