@@ -74,7 +74,7 @@ SENDGRID_API_BASE = "https://api.sendgrid.com/v3"
 SUPPRESSION_ENDPOINTS = {
     "bounce": "bounces",
     "block": "blocks",
-    "invalido": "invalid_emails",
+    "invalids": "invalid_emails",
     "spamreport": "spam_reports",
 }
 # Mesmo fuso do agendamento diario (SCHEDULE_TIMEZONE) - define os limites de
