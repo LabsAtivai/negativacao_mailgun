@@ -28,6 +28,10 @@ import db
 
 app = FastAPI(title="Painel de Negativacao Mailgun / SendGrid / Postal -> Snov.io")
 db.init_db()
+# So aqui, no startup do processo do painel - nunca dentro de start_run() -
+# runs que ficaram presos em "running" (container morreu/reiniciou no meio
+# de uma execucao) sao de fato orfaos nesse momento.
+db.reap_orphaned_runs()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")

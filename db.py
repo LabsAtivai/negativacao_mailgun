@@ -158,6 +158,29 @@ def init_db():
         conn.commit()
 
 
+def reap_orphaned_runs():
+    """Um run so fica 'running' enquanto o processo (subprocess.Popen) esta
+    vivo. Se o container morrer/reiniciar no meio de uma execucao (deploy,
+    OOM, etc.), a linha fica presa em 'running' pra sempre - e como
+    _has_running() em app.py olha esse status, o agendamento diario fica
+    bloqueado ate alguem notar. So chame isso UMA VEZ, no startup do
+    processo do painel (nunca em start_run/sendgrid_start_run/
+    postal_start_run - esses rodam toda vez que uma negativacao comeca, e
+    reapar ali marcaria como falho um run de OUTRO pipeline legitimamente
+    ainda em andamento). No startup do painel, se algo esta 'running' e
+    o processo esta so agora subindo, e porque o run anterior morreu sem
+    finalizar."""
+    with contextlib.closing(_connect()) as conn:
+        for table in ("runs", "sendgrid_runs", "postal_runs"):
+            conn.execute(
+                f"UPDATE {table} SET status = 'failed', "
+                f"finished_at = COALESCE(finished_at, datetime('now')), "
+                f"error = COALESCE(error, 'Interrompido: painel reiniciado com este run ainda em andamento') "
+                f"WHERE status = 'running'"
+            )
+        conn.commit()
+
+
 def start_run(dry_run=False):
     init_db()
     with contextlib.closing(_connect()) as conn:
