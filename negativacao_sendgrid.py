@@ -81,6 +81,11 @@ SUPPRESSION_ENDPOINTS = {
 # "dia anterior" tanto pra API do SendGrid quanto pro filtro no MySQL.
 TZ = ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "America/Sao_Paulo"))
 
+# Data de criacao do painel (primeiro commit do stack) - --todos usa isso
+# como limite inferior, pra nao trazer supressoes antigas da conta SendGrid
+# de antes do painel existir. Limite superior e sempre o dia da execucao.
+PAINEL_START_DATE = "2026-08-27"
+
 
 def env(name, required=True, default=None):
     value = os.getenv(name, default)
@@ -547,6 +552,14 @@ def main():
     use_range = bool(args.desde or args.ate)
     only_yesterday = not args.todos and not use_range
     mode = "range" if use_range else ("ontem" if only_yesterday else "todos")
+
+    if args.todos and not use_range:
+        # "Todo o historico" fica limitado a [inicio do painel, dia da
+        # execucao] - sem isso, a Suppressions API do SendGrid devolveria
+        # tambem supressoes de antes do painel existir.
+        args.desde = PAINEL_START_DATE
+        args.ate = datetime.datetime.now(TZ).date().isoformat()
+        use_range = True
 
     credentials_api_url = env("CREDENTIALS_API_URL").rstrip("/")
     credentials_api_key = env("CREDENTIALS_API_KEY")
