@@ -1,11 +1,11 @@
 """
-Contas Snov.io (campo "email" no snov-am-api) que a negativacao manual pode
-usar. Conta ativa fora desta lista e ignorada; conta da lista que nao existir
-ou estiver inativa no snov-am-api simplesmente nao e usada.
+Contas Snov.io (campo "email" no snov-am-api) do TIME COMERCIAL: so a negativacao
+vinda da extensao/painel do AtivaWriter (scope "commercial") usa esta lista.
+Conta ativa fora dela e ignorada; conta da lista que nao existir ou estiver
+inativa no snov-am-api simplesmente nao e usada.
 
-Compartilhado por app.py (valida o pedido na API) e negativacao_manual.py
-(filtra as contas na execucao) - fica em modulo proprio porque importar
-negativacao_manual dentro do app.py abriria um arquivo de log a cada import.
+A negativacao do MailHub NAO usa esta lista: vai so para a conta achada pelo
+e-mail da conta (pick_accounts_for_mailbox).
 """
 
 ALLOWED_SNOV_ACCOUNTS = frozenset(
@@ -31,62 +31,65 @@ ALLOWED_SNOV_ACCOUNTS = frozenset(
 )
 
 
-def normalize_accounts(raw):
-    """Aceita lista de e-mails (ou string separada por virgula) e devolve um set em minusculas."""
-    if isinstance(raw, str):
-        raw = raw.split(",")
-    return {item.strip().lower() for item in (raw or []) if item and item.strip()}
-
-
 # Segundo nivel comum antes do TLD (mktxpto.com.br -> mktxpto).
 _SECOND_LEVEL = {"com", "net", "org", "gov", "edu", "co", "ind", "eco", "adv"}
-_SKIP_KEYS = {"id", "list_ids"}
 
 
 def domain_term(mailbox):
-    """Trecho identificador do dominio de uma caixa: contato@mktxpto.com.br -> 'mktxpto'."""
+    """
+    Trecho identificador do dominio de uma caixa, sem o prefixo "mkt" dos
+    dominios de marketing: contato@mktadamofilms.com.br -> 'adamofilms'.
+    """
     domain = (mailbox or "").strip().lower().rsplit("@", 1)[-1]
     labels = [label for label in domain.split(".") if label]
     if len(labels) > 1:
         labels.pop()  # TLD
     if len(labels) > 1 and labels[-1] in _SECOND_LEVEL:
         labels.pop()
-    return labels[-1] if labels else ""
+    term = labels[-1] if labels else ""
+    # So tira o "mkt" se sobrar um trecho pesquisavel (>= 3 letras).
+    if term.startswith("mkt") and len(term) - 3 >= 3:
+        term = term[3:]
+    return term
 
 
-def _strings(value):
-    if isinstance(value, str):
-        # Campo que parece e-mail: so a parte local conta - o dominio da conta
-        # Snov.io (ex.: @ativa.ai) e comum a todas e casaria com tudo.
-        yield value.split("@", 1)[0] if "@" in value else value
-    elif isinstance(value, dict):
-        for key, item in value.items():
-            if key not in _SKIP_KEYS:
-                yield from _strings(item)
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            yield from _strings(item)
-
-
-def account_matches_term(account, term):
-    return bool(term) and any(term in text.lower() for text in _strings(account))
+def _local(email):
+    return (email or "").strip().lower().split("@", 1)[0]
 
 
 def pick_accounts_for_mailbox(accounts, mailbox):
     """
-    Contas Snov.io donas de uma caixa, dentro da lista permitida:
-      1) conta com e-mail igual ao da caixa; senao
-      2) contas cujo qualquer campo contem o trecho do dominio da caixa.
+    Conta(s) Snov.io dona(s) de uma caixa do MailHub, entre TODAS as contas ativas
+    (nao usa a lista de 16 - essa e so do time comercial / AtivaWriter).
+    A conta do cliente tem o nome do cliente no e-mail: caixa
+    danilo_@mktadamofilms.com.br -> trecho 'adamofilms' -> adamofilms@ativa.ai.
+    Em ordem, para no primeiro criterio que achar algo:
+      1) conta com e-mail igual ao da caixa;
+      2) parte local do e-mail da conta igual ao trecho do dominio;
+      3) parte local do e-mail da conta contendo o trecho (trecho >= 5 letras).
+    Caixa no proprio dominio das contas (@ativa.ai) so usa o criterio 1.
     Retorna (contas, descricao_do_criterio).
     """
     mailbox = (mailbox or "").strip().lower()
-    allowed = [a for a in accounts if (a.get("email") or "").strip().lower() in ALLOWED_SNOV_ACCOUNTS]
+    email = lambda a: (a.get("email") or "").strip().lower()  # noqa: E731
 
-    exact = [a for a in allowed if (a.get("email") or "").strip().lower() == mailbox]
+    exact = [a for a in accounts if email(a) == mailbox]
     if exact:
         return exact, f"e-mail igual ao da caixa ({mailbox})"
+
+    if mailbox.rsplit("@", 1)[-1].endswith("ativa.ai"):
+        return [], "caixa @ativa.ai sem conta Snov.io com o mesmo e-mail"
 
     term = domain_term(mailbox)
     if len(term) < 3:
         return [], f"trecho de dominio muito curto para pesquisar ({term!r})"
-    return [a for a in allowed if account_matches_term(a, term)], f"trecho do dominio {term!r}"
+
+    same = [a for a in accounts if _local(a.get("email")) == term]
+    if same:
+        return same, f"e-mail da conta = {term}@... (trecho do dominio)"
+
+    if len(term) >= 5:
+        like = [a for a in accounts if term in _local(a.get("email"))]
+        if like:
+            return like, f"e-mail da conta parecido com {term!r} (trecho do dominio)"
+    return [], f"nenhum e-mail de conta igual ou parecido com {term!r}"
