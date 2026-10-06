@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import db
+from snov_accounts import ALLOWED_SNOV_ACCOUNTS, normalize_accounts
 
 app = FastAPI(title="Painel de Negativacao Mailgun / SendGrid / Postal -> Snov.io")
 db.init_db()
@@ -232,6 +233,12 @@ async def api_postal_webhook(request: Request, key: str | None = None):
 
 class ManualTrigger(BaseModel):
     value: str
+    # Contas Snov.io (e-mail) donas da caixa que pediu a negativacao. Sem isso,
+    # vale para todas as contas permitidas (aba Manual do painel).
+    accounts: list[str] | None = None
+    # E-mail da caixa do MailHub: a conta Snov.io dona e achada pelo e-mail igual
+    # ou pelo trecho do dominio da caixa (ex.: mktxpto) em qualquer campo da conta.
+    mailbox: str | None = None
 
 
 @app.post("/api/manual/runs/trigger")
@@ -241,7 +248,21 @@ def api_trigger_manual_run(payload: ManualTrigger):
         raise HTTPException(status_code=400, detail="Informe um e-mail ou dominio, sem espacos")
     if _has_running(db.list_manual_runs(limit=5)):
         raise HTTPException(status_code=409, detail="Ja ha uma negativacao manual em andamento")
-    subprocess.Popen([sys.executable, "negativacao_manual.py", "--value", value], cwd=BASE_DIR)
+    cmd = [sys.executable, "negativacao_manual.py", "--value", value]
+    if payload.mailbox is not None:
+        mailbox = payload.mailbox.strip().lower()
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", mailbox):
+            raise HTTPException(status_code=400, detail="E-mail da caixa invalido")
+        cmd += ["--mailbox", mailbox]
+    elif payload.accounts is not None:
+        accounts = normalize_accounts(payload.accounts)
+        if not accounts:
+            raise HTTPException(status_code=400, detail="Informe ao menos uma conta Snov.io")
+        fora = sorted(accounts - ALLOWED_SNOV_ACCOUNTS)
+        if fora:
+            raise HTTPException(status_code=400, detail=f"Conta(s) Snov.io fora da lista permitida: {fora}")
+        cmd += ["--accounts", ",".join(sorted(accounts))]
+    subprocess.Popen(cmd, cwd=BASE_DIR)
     return {"status": "started"}
 
 

@@ -15,6 +15,11 @@ endereco daquele dominio. Um e-mail completo negativa so aquele endereco.
 Uso:
     python negativacao_manual.py --value fulano@dominio.com
     python negativacao_manual.py --value dominio-ruim.com
+    python negativacao_manual.py --value fulano@dominio.com --accounts sdr3@ativa.ai
+
+Sem --accounts, usa todas as contas da lista permitida (snov_accounts.py). Com
+--accounts, usa so a intersecao dessas contas com a lista permitida - e o que o
+MailHub manda para negativar apenas na conta Snov.io dona da caixa.
 """
 import argparse
 import builtins
@@ -30,6 +35,7 @@ import requests
 from dotenv import load_dotenv
 
 import db
+from snov_accounts import ALLOWED_SNOV_ACCOUNTS, normalize_accounts, pick_accounts_for_mailbox
 
 load_dotenv()
 
@@ -60,31 +66,6 @@ TOKEN_REFRESH_SECONDS = 3000
 # (connect_timeout, read_timeout) - sem isso, uma conexao travada trava a thread
 # para sempre, pois requests nao tem timeout por padrao.
 HTTP_TIMEOUT = (10, 30)
-
-# A negativacao manual so vai para estas contas Snov.io (campo "email" no
-# snov-am-api). Conta ativa fora desta lista e ignorada; conta da lista que
-# nao existir/estiver inativa no snov-am-api simplesmente nao e usada.
-ALLOWED_SNOV_ACCOUNTS = frozenset(
-    email.lower()
-    for email in (
-        "sdr@ativa.ai",
-        "sdr2@ativa.ai",
-        "sdr3@ativa.ai",
-        "sdr4@ativa.ai",
-        "sdr5@ativa.ai",
-        "sdr6@ativa.ai",
-        "sdr7@ativa.ai",
-        "sdr8@ativa.ai",
-        "sdr9@ativa.ai",
-        "sdr10@ativa.ai",
-        "salesops@ativa.ai",
-        "salesops2@ativa.ai",
-        "proativa.io@ativa.ai",
-        "proativa.io2@ativa.ai",
-        "sdrremoto@ativa.ai",
-        "sdrremoto2@ativa.ai",
-    )
-)
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 DOMAIN_RE = re.compile(r"^([a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$", re.IGNORECASE)
@@ -283,6 +264,18 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--value", required=True, help="E-mail ou dominio a negativar em todas as contas Snov.io.")
     parser.add_argument(
+        "--accounts",
+        type=str,
+        default=None,
+        help="E-mails de contas Snov.io (separados por virgula) para restringir a negativacao. Default: todas as permitidas.",
+    )
+    parser.add_argument(
+        "--mailbox",
+        type=str,
+        default=None,
+        help="E-mail da caixa que pediu a negativacao: acha a conta Snov.io dona (e-mail igual ou trecho do dominio da caixa em qualquer campo da conta).",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=int(os.getenv("PIPELINE_WORKERS", "5")),
@@ -299,20 +292,44 @@ def main():
     except ValueError as exc:
         sys.exit(str(exc))
 
+    requested = normalize_accounts(args.accounts) if args.accounts is not None else None
+    if requested is not None and not requested:
+        sys.exit("--accounts vazio: informe ao menos uma conta Snov.io")
     credentials_api_url = env("CREDENTIALS_API_URL").rstrip("/")
     credentials_api_key = env("CREDENTIALS_API_KEY")
 
     run_id = db.manual_start_run(value, kind)
-    print(f"Run #{run_id} iniciado: negativando {kind} {value!r} em todas as contas Snov.io ativas.\n")
+    if args.mailbox:
+        alvo = f"conta(s) dona(s) da caixa {args.mailbox}"
+    else:
+        alvo = "todas as contas permitidas" if requested is None else sorted(requested)
+    print(f"Run #{run_id} iniciado: negativando {kind} {value!r} em {alvo}.\n")
 
     try:
         print("Buscando contas Snov.io ativas no snov-am-api...")
         all_accounts = fetch_active_snov_accounts(credentials_api_url, credentials_api_key)
-        accounts = [a for a in all_accounts if (a.get("email") or "").strip().lower() in ALLOWED_SNOV_ACCOUNTS]
-        print(f"{len(all_accounts)} conta(s) ativa(s) no snov-am-api, {len(accounts)} na lista permitida.")
-        ausentes = sorted(ALLOWED_SNOV_ACCOUNTS - {(a.get("email") or "").strip().lower() for a in accounts})
-        if ausentes:
-            print(f"Permitidas ausentes/inativas no snov-am-api (ignoradas): {ausentes}")
+        if args.mailbox:
+            accounts, criterio = pick_accounts_for_mailbox(all_accounts, args.mailbox)
+            print(f"{len(all_accounts)} conta(s) ativa(s) no snov-am-api; dona(s) da caixa {args.mailbox!r} por {criterio}: {len(accounts)}.")
+            if not accounts:
+                msg = f"Nenhuma conta Snov.io permitida encontrada para a caixa {args.mailbox} ({criterio})"
+                db.manual_finish_run(run_id, status="failed", total_emails=1, error=msg)
+                print(msg)
+                return
+            if len(accounts) > 1:
+                print(f"AVISO: {len(accounts)} contas casaram com a caixa, negativando em todas: {[a.get('email') for a in accounts]}")
+        else:
+            wanted = ALLOWED_SNOV_ACCOUNTS if requested is None else requested & ALLOWED_SNOV_ACCOUNTS
+            accounts = [a for a in all_accounts if (a.get("email") or "").strip().lower() in wanted]
+            print(f"{len(all_accounts)} conta(s) ativa(s) no snov-am-api, {len(accounts)} na lista alvo.")
+            ausentes = sorted(wanted - {(a.get("email") or "").strip().lower() for a in accounts})
+            if ausentes:
+                print(f"Alvo ausentes/inativas no snov-am-api (ignoradas): {ausentes}")
+            if requested is not None and not accounts:
+                msg = f"Conta(s) Snov.io dona(s) nao encontrada(s) ativa(s) no snov-am-api: {sorted(requested)}"
+                db.manual_finish_run(run_id, status="failed", total_emails=1, error=msg)
+                print(msg)
+                return
         targets = [(a, lid) for a in accounts for lid in (a.get("list_ids") or [])]
         print(f"{len(accounts)} conta(s) Snov.io ativa(s), {len(targets)} lista(s) (list_id) no total.\n")
 
