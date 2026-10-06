@@ -15,6 +15,7 @@ Uso:
     python negativacao_postal.py --dry-run   # so mostra contagens, nada enviado
     python negativacao_postal.py             # roda de verdade (so eventos novos)
     python negativacao_postal.py --todos     # roda de verdade (todo o historico de eventos)
+    python negativacao_postal.py --source postal2   # mesmo fluxo, buffer/runs do Postal2
 """
 import argparse
 import builtins
@@ -33,9 +34,10 @@ import db
 
 load_dotenv()
 
+_SOURCE_FOR_LOG = "postal2" if "postal2" in sys.argv else "postal"
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
-LOG_PATH = os.path.join(LOG_DIR, f"negativacao_postal_{datetime.datetime.now():%Y%m%d_%H%M%S}.txt")
+LOG_PATH = os.path.join(LOG_DIR, f"negativacao_{_SOURCE_FOR_LOG}_{datetime.datetime.now():%Y%m%d_%H%M%S}.txt")
 _log_file = open(LOG_PATH, "a", encoding="utf-8")
 
 
@@ -250,7 +252,7 @@ def process_account(account, email_list, batch_size, credentials_api_url, creden
     results = []
     for list_id in list_ids:
         lp = f"{prefix}[list={list_id}] "
-        failed_log_path = f"falhas_postal_{account['id']}_{list_id}.txt"
+        failed_log_path = f"falhas_{_SOURCE_FOR_LOG}_{account['id']}_{list_id}.txt"
         try:
             added, duplicates, failed = send_to_do_not_email_list(
                 token_holder, list_id, email_list, batch_size, log_prefix=lp, failed_log_path=failed_log_path
@@ -282,6 +284,12 @@ def parse_args():
         help="Reprocessa TODOS os eventos ja recebidos (inclusive os ja marcados como processados).",
     )
     parser.add_argument(
+        "--source",
+        choices=db.POSTAL_SOURCES,
+        default="postal",
+        help="Qual servidor Postal consumir (buffer de eventos e runs separados por fonte).",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=int(os.getenv("PIPELINE_WORKERS", "5")),
@@ -297,21 +305,22 @@ def main():
     credentials_api_key = env("CREDENTIALS_API_KEY")
     batch_size = int(env("SNOVIO_BATCH_SIZE", default="100"))
 
+    source = args.source
     mode = "todos" if args.todos else "novos"
-    run_id = db.postal_start_run(mode=mode, dry_run=args.dry_run)
+    run_id = db.postal_start_run(mode=mode, dry_run=args.dry_run, source=source)
     print(f"Run #{run_id} iniciado.\n")
 
     try:
         if args.todos:
             print("Buscando TODOS os eventos de webhook do Postal ja recebidos (--todos)...")
-            events = db.list_all_postal_events()
+            events = db.list_all_postal_events(source)
         else:
             print("Buscando eventos de webhook do Postal ainda nao processados...")
-            events = db.list_unprocessed_postal_events()
+            events = db.list_unprocessed_postal_events(source)
 
         if not events:
             print("Nenhum evento de negativacao pendente. Nada a fazer.")
-            db.postal_finish_run(run_id, status="completed", total_emails=0)
+            db.postal_finish_run(run_id, status="completed", total_emails=0, source=source)
             return
 
         emails = sorted({e["recipient"] for e in events})
@@ -319,7 +328,7 @@ def main():
 
         breakdown = Counter((e["received_at"][:10], e["event_kind"]) for e in events)
         for (date, kind), count in sorted(breakdown.items()):
-            db.postal_record_date_breakdown(run_id, date, kind, count)
+            db.postal_record_date_breakdown(run_id, date, kind, count, source=source)
 
         print("Buscando contas Snov.io ativas no snov-am-api...")
         accounts = fetch_active_snov_accounts(credentials_api_url, credentials_api_key)
@@ -331,12 +340,12 @@ def main():
             print(f"Contas ativas SEM list_ids cadastrado (nada sera enviado para elas): {contas_sem_list_id}\n")
 
         if args.dry_run:
-            db.postal_finish_run(run_id, status="completed", total_emails=len(emails))
+            db.postal_finish_run(run_id, status="completed", total_emails=len(emails, source=source))
             print("--dry-run: nada foi enviado, eventos NAO marcados como processados.")
             return
 
         if not targets:
-            db.postal_finish_run(run_id, status="completed", total_emails=len(emails))
+            db.postal_finish_run(run_id, status="completed", total_emails=len(emails, source=source))
             print("Nenhuma lista Snov (list_id) encontrada nas contas ativas. Nada a fazer.")
             return
 
@@ -352,17 +361,17 @@ def main():
 
         print("\nResumo final:")
         for account_label, list_id, added, duplicates, failed, error in sorted(flat_results, key=lambda r: (str(r[0]), str(r[1]))):
-            db.postal_record_account_result(run_id, str(account_label), list_id, added, duplicates, failed, error)
+            db.postal_record_account_result(run_id, str(account_label), list_id, added, duplicates, failed, error, source=source)
             if error:
                 print(f"  {account_label} [list={list_id}]: ERRO -> {error}")
             else:
                 extra = f", {failed} falharam" if failed else ""
                 print(f"  {account_label} [list={list_id}]: {added} enviados, {duplicates} duplicados{extra}")
 
-        db.postal_finish_run(run_id, status="completed", total_emails=len(emails))
-        db.mark_postal_events_processed([e["id"] for e in events])
+        db.postal_finish_run(run_id, status="completed", total_emails=len(emails, source=source))
+        db.mark_postal_events_processed([e["id"] for e in events], source=source)
     except Exception as exc:
-        db.postal_finish_run(run_id, status="failed", error=str(exc))
+        db.postal_finish_run(run_id, status="failed", error=str(exc, source=source))
         raise
 
 

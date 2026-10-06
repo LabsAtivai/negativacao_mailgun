@@ -17,6 +17,7 @@ x-env: &env
   # Chave exigida em POST /api/postal/webhook?key=... (configurada no admin
   # do Postal, na URL do webhook do servidor).
   POSTAL_WEBHOOK_SECRET: ${POSTAL_WEBHOOK_SECRET:-}
+  POSTAL2_WEBHOOK_SECRET: ${POSTAL2_WEBHOOK_SECRET:-}
   # Agendamento diario dos 3 pipelines, rodando dentro do servico "dashboard".
   SCHEDULE_TIMEZONE: ${SCHEDULE_TIMEZONE:-America/Sao_Paulo}
   SCHEDULE_HOUR: ${SCHEDULE_HOUR:-1}

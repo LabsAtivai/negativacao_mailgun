@@ -133,6 +133,53 @@ CREATE TABLE IF NOT EXISTS postal_account_results (
 CREATE INDEX IF NOT EXISTS idx_postal_date_breakdown_run ON postal_date_breakdown(run_id);
 CREATE INDEX IF NOT EXISTS idx_postal_account_results_run ON postal_account_results(run_id);
 
+-- Postal2: segundo servidor Postal, mesmo fluxo do Postal, mas com webhook
+-- proprio (POST /api/postal2/webhook) e tabelas separadas, pra metrica propria.
+CREATE TABLE IF NOT EXISTS postal2_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    received_at TEXT NOT NULL DEFAULT (datetime('now')),
+    event_kind TEXT NOT NULL,   -- delivery_failed | soft_failed | held | bounced
+    status TEXT,
+    recipient TEXT NOT NULL,
+    message_token TEXT,
+    processed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_postal2_events_processed ON postal2_events(processed_at);
+
+CREATE TABLE IF NOT EXISTS postal2_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    dry_run INTEGER NOT NULL DEFAULT 0,
+    mode TEXT,          -- novos | todos
+    total_emails INTEGER,
+    error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS postal2_date_breakdown (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES postal2_runs(id),
+    date TEXT NOT NULL,
+    kind TEXT NOT NULL,   -- delivery_failed | soft_failed | held | bounced
+    count INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS postal2_account_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES postal2_runs(id),
+    account_label TEXT NOT NULL,
+    list_id TEXT,
+    added INTEGER NOT NULL DEFAULT 0,
+    duplicates INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_postal2_date_breakdown_run ON postal2_date_breakdown(run_id);
+CREATE INDEX IF NOT EXISTS idx_postal2_account_results_run ON postal2_account_results(run_id);
+
 -- Negativacao manual: usuario digita um e-mail ou dominio avulso na aba
 -- "Manual" do painel, e o painel manda pra Lista de e-mails a nao enviar de
 -- TODAS as contas Snov.io ativas - mesma fonte de contas dos 3 pipelines
@@ -199,7 +246,7 @@ def reap_orphaned_runs():
     o processo esta so agora subindo, e porque o run anterior morreu sem
     finalizar."""
     with contextlib.closing(_connect()) as conn:
-        for table in ("runs", "sendgrid_runs", "postal_runs", "manual_runs"):
+        for table in ("runs", "sendgrid_runs", "postal_runs", "postal2_runs", "manual_runs"):
             conn.execute(
                 f"UPDATE {table} SET status = 'failed', "
                 f"finished_at = COALESCE(finished_at, datetime('now')), "
@@ -400,51 +447,65 @@ def get_sendgrid_run(run_id):
         return result
 
 
-def record_postal_event(event_kind, recipient, status=None, message_token=None):
+POSTAL_SOURCES = ("postal", "postal2")
+
+
+def _postal_tables(source):
+    if source not in POSTAL_SOURCES:
+        raise ValueError(f"source Postal invalida: {source}")
+    return source
+
+
+def record_postal_event(event_kind, recipient, status=None, message_token=None, source="postal"):
+    p = _postal_tables(source)
     init_db()
     with contextlib.closing(_connect()) as conn:
         conn.execute(
-            """INSERT INTO postal_events (event_kind, recipient, status, message_token)
+            f"""INSERT INTO {p}_events (event_kind, recipient, status, message_token)
                VALUES (?, ?, ?, ?)""",
             (event_kind, recipient, status, message_token),
         )
         conn.commit()
 
 
-def list_unprocessed_postal_events():
+def list_unprocessed_postal_events(source="postal"):
+    p = _postal_tables(source)
     with contextlib.closing(_connect()) as conn:
         rows = conn.execute(
-            "SELECT id, received_at, event_kind, recipient FROM postal_events "
+            f"SELECT id, received_at, event_kind, recipient FROM {p}_events "
             "WHERE processed_at IS NULL ORDER BY id"
         ).fetchall()
         return [dict(row) for row in rows]
 
 
-def list_all_postal_events():
+def list_all_postal_events(source="postal"):
+    p = _postal_tables(source)
     with contextlib.closing(_connect()) as conn:
         rows = conn.execute(
-            "SELECT id, received_at, event_kind, recipient FROM postal_events ORDER BY id"
+            f"SELECT id, received_at, event_kind, recipient FROM {p}_events ORDER BY id"
         ).fetchall()
         return [dict(row) for row in rows]
 
 
-def mark_postal_events_processed(ids):
+def mark_postal_events_processed(ids, source="postal"):
+    p = _postal_tables(source)
     if not ids:
         return
     with contextlib.closing(_connect()) as conn:
         placeholders = ",".join("?" * len(ids))
         conn.execute(
-            f"UPDATE postal_events SET processed_at = datetime('now') WHERE id IN ({placeholders})",
+            f"UPDATE {p}_events SET processed_at = datetime('now') WHERE id IN ({placeholders})",
             tuple(ids),
         )
         conn.commit()
 
 
-def postal_start_run(mode=None, dry_run=False):
+def postal_start_run(mode=None, dry_run=False, source="postal"):
+    p = _postal_tables(source)
     init_db()
     with contextlib.closing(_connect()) as conn:
         cur = conn.execute(
-            """INSERT INTO postal_runs (started_at, status, dry_run, mode)
+            f"""INSERT INTO {p}_runs (started_at, status, dry_run, mode)
                VALUES (datetime('now'), 'running', ?, ?)""",
             (1 if dry_run else 0, mode),
         )
@@ -452,19 +513,21 @@ def postal_start_run(mode=None, dry_run=False):
         return cur.lastrowid
 
 
-def postal_record_date_breakdown(run_id, date, kind, count):
+def postal_record_date_breakdown(run_id, date, kind, count, source="postal"):
+    p = _postal_tables(source)
     with contextlib.closing(_connect()) as conn:
         conn.execute(
-            "INSERT INTO postal_date_breakdown (run_id, date, kind, count) VALUES (?, ?, ?, ?)",
+            f"INSERT INTO {p}_date_breakdown (run_id, date, kind, count) VALUES (?, ?, ?, ?)",
             (run_id, date, kind, count),
         )
         conn.commit()
 
 
-def postal_record_account_result(run_id, account_label, list_id, added, duplicates, failed, error=None):
+def postal_record_account_result(run_id, account_label, list_id, added, duplicates, failed, error=None, source="postal"):
+    p = _postal_tables(source)
     with contextlib.closing(_connect()) as conn:
         conn.execute(
-            """INSERT INTO postal_account_results
+            f"""INSERT INTO {p}_account_results
                (run_id, account_label, list_id, added, duplicates, failed, error)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (run_id, account_label, str(list_id) if list_id is not None else None, added, duplicates, failed, error),
@@ -472,35 +535,38 @@ def postal_record_account_result(run_id, account_label, list_id, added, duplicat
         conn.commit()
 
 
-def postal_finish_run(run_id, status, total_emails=None, error=None):
+def postal_finish_run(run_id, status, total_emails=None, error=None, source="postal"):
+    p = _postal_tables(source)
     with contextlib.closing(_connect()) as conn:
         conn.execute(
-            """UPDATE postal_runs SET finished_at = datetime('now'), status = ?,
+            f"""UPDATE {p}_runs SET finished_at = datetime('now'), status = ?,
                total_emails = ?, error = ? WHERE id = ?""",
             (status, total_emails, error, run_id),
         )
         conn.commit()
 
 
-def list_postal_runs(limit=50):
+def list_postal_runs(limit=50, source="postal"):
+    p = _postal_tables(source)
     with contextlib.closing(_connect()) as conn:
         rows = conn.execute(
-            "SELECT * FROM postal_runs ORDER BY id DESC LIMIT ?", (limit,)
+            f"SELECT * FROM {p}_runs ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(row) for row in rows]
 
 
-def get_postal_run(run_id):
+def get_postal_run(run_id, source="postal"):
+    p = _postal_tables(source)
     with contextlib.closing(_connect()) as conn:
-        run = conn.execute("SELECT * FROM postal_runs WHERE id = ?", (run_id,)).fetchone()
+        run = conn.execute(f"SELECT * FROM {p}_runs WHERE id = ?", (run_id,)).fetchone()
         if not run:
             return None
         dates = conn.execute(
-            "SELECT date, kind, count FROM postal_date_breakdown WHERE run_id = ? ORDER BY date, kind",
+            f"SELECT date, kind, count FROM {p}_date_breakdown WHERE run_id = ? ORDER BY date, kind",
             (run_id,),
         ).fetchall()
         accounts = conn.execute(
-            "SELECT account_label, list_id, added, duplicates, failed, error FROM postal_account_results "
+            f"SELECT account_label, list_id, added, duplicates, failed, error FROM {p}_account_results "
             "WHERE run_id = ? ORDER BY account_label, list_id",
             (run_id,),
         ).fetchall()
@@ -573,12 +639,13 @@ _INSIGHTS_SOURCES = (
     ("mailgun", "runs", "account_results"),
     ("sendgrid", "sendgrid_runs", "sendgrid_account_results"),
     ("postal", "postal_runs", "postal_account_results"),
+    ("postal2", "postal2_runs", "postal2_account_results"),
     ("manual", "manual_runs", "manual_account_results"),
 )
 
 
 def get_insights():
-    """Agrega o historico dos 4 pipelines (mailgun/sendgrid/postal/manual)
+    """Agrega o historico dos 5 pipelines (mailgun/sendgrid/postal/postal2/manual)
     desde o inicio: totais gerais, totais por fonte, volume diario por fonte
     e a lista de erros mais recentes (run inteiro que falhou, ou uma conta
     especifica que falhou dentro de um run que no geral deu certo)."""

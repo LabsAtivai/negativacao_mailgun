@@ -5,7 +5,7 @@ Snov.io e Postal -> Snov.io), mais a negativacao manual avulsa (aba
 gravado por negativacao_mailgun.py, negativacao_sendgrid.py,
 negativacao_postal.py e negativacao_manual.py no SQLite (db.py), e pode
 disparar os 4 via POST /api/runs/trigger, /api/sendgrid/runs/trigger,
-/api/postal/runs/trigger e /api/manual/runs/trigger (mesmo processo/imagem,
+/api/postal/runs/trigger, /api/postal2/runs/trigger e /api/manual/runs/trigger (mesmo processo/imagem,
 subprocess.Popen - os botoes do painel usam isso). Postal e diferente dos
 outros: nao ha API de pull, o dado so chega via webhook (POST
 /api/postal/webhook), que grava eventos brutos consumidos depois em lote por
@@ -44,6 +44,9 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 SENDGRID_INGEST_API_KEY = os.getenv("SENDGRID_INGEST_API_KEY")
 POSTAL_WEBHOOK_SECRET = os.getenv("POSTAL_WEBHOOK_SECRET")
+# Postal2 usa a mesma chave por padrao (so a URL muda); defina POSTAL2_WEBHOOK_SECRET
+# pra ter uma chave propria.
+POSTAL2_WEBHOOK_SECRET = os.getenv("POSTAL2_WEBHOOK_SECRET") or POSTAL_WEBHOOK_SECRET
 
 # Status events (payload com "message"+"status") que indicam e-mail ruim.
 # Chave = valor real do campo "status" no body. O Postal NAO manda header
@@ -191,11 +194,10 @@ def api_trigger_postal_run(payload: PostalTrigger = PostalTrigger()):
     return {"status": "started"}
 
 
-@app.post("/api/postal/webhook")
-async def api_postal_webhook(request: Request, key: str | None = None):
-    if not POSTAL_WEBHOOK_SECRET:
-        raise HTTPException(status_code=503, detail="POSTAL_WEBHOOK_SECRET nao configurada no painel")
-    if not key or not hmac.compare_digest(key, POSTAL_WEBHOOK_SECRET):
+async def _handle_postal_webhook(request, key, secret, source):
+    if not secret:
+        raise HTTPException(status_code=503, detail="Chave do webhook Postal nao configurada no painel")
+    if not key or not hmac.compare_digest(key, secret):
         raise HTTPException(status_code=401, detail="key invalida ou ausente")
 
     envelope = await request.json()
@@ -215,7 +217,7 @@ async def api_postal_webhook(request: Request, key: str | None = None):
         recipient = (payload.get("original_message") or {}).get("to")
         token = (payload.get("bounce") or {}).get("token")
         if recipient:
-            db.record_postal_event("bounced", recipient, status="Bounced", message_token=token)
+            db.record_postal_event("bounced", recipient, status="Bounced", message_token=token, source=source)
         return {"status": "ok"}
 
     # Status event: {"message": {...}, "status": "Sent"|"SoftFail"|"HardFail"|"Held", ...}.
@@ -224,11 +226,48 @@ async def api_postal_webhook(request: Request, key: str | None = None):
         message = payload.get("message") or {}
         recipient = message.get("to")
         if recipient:
-            db.record_postal_event(kind, recipient, status=payload.get("status"), message_token=message.get("token"))
+            db.record_postal_event(
+                kind, recipient, status=payload.get("status"), message_token=message.get("token"), source=source
+            )
 
     # Eventos irrelevantes (MessageSent, MessageDelayed, MessageLoaded,
     # MessageLinkClicked, DomainDNSError, ...) sao so confirmados, sem gravar nada.
     return {"status": "ok"}
+
+
+@app.post("/api/postal/webhook")
+async def api_postal_webhook(request: Request, key: str | None = None):
+    return await _handle_postal_webhook(request, key, POSTAL_WEBHOOK_SECRET, "postal")
+
+
+@app.post("/api/postal2/webhook")
+async def api_postal2_webhook(request: Request, key: str | None = None):
+    return await _handle_postal_webhook(request, key, POSTAL2_WEBHOOK_SECRET, "postal2")
+
+
+@app.get("/api/postal2/runs")
+def api_list_postal2_runs(limit: int = 50):
+    limit = max(1, min(limit, 500))
+    return db.list_postal_runs(limit=limit, source="postal2")
+
+
+@app.get("/api/postal2/runs/{run_id}")
+def api_get_postal2_run(run_id: int):
+    run = db.get_postal_run(run_id, source="postal2")
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run nao encontrado")
+    return run
+
+
+@app.post("/api/postal2/runs/trigger")
+def api_trigger_postal2_run(payload: PostalTrigger = PostalTrigger()):
+    if _has_running(db.list_postal_runs(limit=5, source="postal2")):
+        raise HTTPException(status_code=409, detail="Ja ha uma execucao Postal2 em andamento")
+    cmd = [sys.executable, "negativacao_postal.py", "--source", "postal2"]
+    if payload.todos:
+        cmd.append("--todos")
+    subprocess.Popen(cmd, cwd=BASE_DIR)
+    return {"status": "started"}
 
 
 class ManualTrigger(BaseModel):
@@ -318,5 +357,13 @@ scheduler.add_job(
 scheduler.add_job(
     lambda: _run_scheduled_pipeline([sys.executable, "negativacao_postal.py"], db.list_postal_runs, "Postal"),
     _cron, id="postal_nightly", replace_existing=True,
+)
+scheduler.add_job(
+    lambda: _run_scheduled_pipeline(
+        [sys.executable, "negativacao_postal.py", "--source", "postal2"],
+        lambda limit: db.list_postal_runs(limit=limit, source="postal2"),
+        "Postal2",
+    ),
+    _cron, id="postal2_nightly", replace_existing=True,
 )
 scheduler.start()

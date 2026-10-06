@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Negativacao Mailgun / SendGrid / Postal -> Snov.io</title>
+<title>Negativacao Mailgun / SendGrid / Postal / Postal2 -> Snov.io</title>
 <style>
   :root {
     --bg: #0f1115;
@@ -260,6 +260,7 @@
   <button class="tab-btn active" data-tab="mailgun">Mailgun</button>
   <button class="tab-btn" data-tab="sendgrid">SendGrid</button>
   <button class="tab-btn" data-tab="postal">Postal</button>
+  <button class="tab-btn" data-tab="postal2">Postal2</button>
   <button class="tab-btn" data-tab="manual">Manual</button>
   <button class="tab-btn" data-tab="insights">Insights</button>
 </nav>
@@ -325,6 +326,29 @@
       <div class="empty">Carregando...</div>
     </div>
     <div class="detail" id="detail-panel-postal">
+      <div class="empty">Selecione uma execucao a esquerda.</div>
+    </div>
+  </main>
+</section>
+
+<section class="tab-panel" id="tab-postal2">
+  <section class="trend-section">
+    <div class="trend-header">
+      <h2>E-mails unicos por execucao (historico)</h2>
+      <div class="trend-header-actions">
+        <label class="todos-check"><input type="checkbox" id="todos-check-postal2"> reprocessar todo o historico (--todos)</label>
+        <button class="run-btn" id="run-btn-postal2">Rodar agora</button>
+      </div>
+    </div>
+    <div class="trend-chart-wrap">
+      <div class="trend-chart" id="trend-chart-postal2"><div class="empty">Carregando...</div></div>
+    </div>
+  </section>
+  <main>
+    <div class="runs-panel" id="runs-panel-postal2">
+      <div class="empty">Carregando...</div>
+    </div>
+    <div class="detail" id="detail-panel-postal2">
       <div class="empty">Selecione uma execucao a esquerda.</div>
     </div>
   </main>
@@ -781,6 +805,42 @@ createDashboard({
   },
 });
 
+// ---- Postal2 (mesmo formato do Postal, webhook/buffer proprios): breakdown por data, 3 series (delivery_failed/soft_failed/held/bounced -
+// eventos chegam via webhook, nao ha "dominio", so o tipo de falha) ----
+createDashboard({
+  prefix: 'postal2',
+  apiBase: '/api/postal2/runs',
+  triggerUrl: '/api/postal2/runs/trigger',
+  triggerBody: (todos) => ({ todos }),
+  confirmMessage: (todos) => todos
+    ? 'Rodar a negativacao Postal2 agora reprocessando TODO o historico de eventos de webhook (--todos)? Envio real pra TODAS as contas Snov.io ativas.'
+    : 'Rodar a negativacao Postal2 agora (so os eventos de webhook ainda nao processados)? Envio real pra TODAS as contas Snov.io ativas.',
+  groupLabel: 'Data',
+  breakdownTitle: 'Negativados por data (Postal2)',
+  series: [
+    { key: 'delivery_failed', color: 'var(--series-1)', label: 'Delivery failed' },
+    { key: 'soft_failed', color: 'var(--series-4)', label: 'Soft failed' },
+    { key: 'held', color: 'var(--series-2)', label: 'Held' },
+    { key: 'bounced', color: 'var(--series-3)', label: 'Bounced' },
+  ],
+  runSummaryLine: (r) => `${r.mode ?? '-'} · ${r.total_emails ?? '-'} e-mails`,
+  extraStats: (run) => [[run.mode ?? '-', 'modo']],
+  buildBreakdownRows: (run) => {
+    const totals = {};
+    (run.date_breakdown || []).forEach(d => {
+      totals[d.date] = totals[d.date] || {};
+      totals[d.date][d.kind] = d.count;
+    });
+    return Object.entries(totals)
+      .map(([date, counts]) => ({
+        label: date,
+        counts,
+        total: (counts.delivery_failed || 0) + (counts.soft_failed || 0) + (counts.held || 0) + (counts.bounced || 0),
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  },
+});
+
 // ==========================================================================
 // Manual: negativar e-mail/dominio avulso sob demanda, mesma logica de
 // runs-panel/detail-panel dos outros tabs, so que sem trend/breakdown chart
@@ -915,13 +975,14 @@ createDashboard({
 })();
 
 // ==========================================================================
-// Insights: agrega os 4 pipelines (mailgun/sendgrid/postal/manual) desde o
+// Insights: agrega os 5 pipelines (mailgun/sendgrid/postal/postal2/manual) desde o
 // inicio - totais, volume diario por fonte e erros recentes.
 // ==========================================================================
 const INSIGHTS_SOURCE_SERIES = [
   { key: 'mailgun', color: 'var(--series-1)', label: 'Mailgun' },
   { key: 'sendgrid', color: 'var(--series-2)', label: 'SendGrid' },
   { key: 'postal', color: 'var(--series-3)', label: 'Postal' },
+  { key: 'postal2', color: 'var(--series-5)', label: 'Postal2' },
   { key: 'manual', color: 'var(--series-4)', label: 'Manual' },
 ];
 
