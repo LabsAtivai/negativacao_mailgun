@@ -132,6 +132,34 @@ CREATE TABLE IF NOT EXISTS postal_account_results (
 
 CREATE INDEX IF NOT EXISTS idx_postal_date_breakdown_run ON postal_date_breakdown(run_id);
 CREATE INDEX IF NOT EXISTS idx_postal_account_results_run ON postal_account_results(run_id);
+
+-- Negativacao manual: usuario digita um e-mail ou dominio avulso na aba
+-- "Manual" do painel, e o painel manda pra Lista de e-mails a nao enviar de
+-- TODAS as contas Snov.io ativas - mesma fonte de contas dos 3 pipelines
+-- automaticos, so que sob demanda e um valor por vez (negativacao_manual.py).
+CREATE TABLE IF NOT EXISTS manual_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    value TEXT NOT NULL,        -- e-mail ou "@dominio", ja normalizado
+    kind TEXT NOT NULL,         -- email | domain
+    total_emails INTEGER,       -- sempre 1 (um valor por run) - mesma coluna dos outros 3, usada pelo /api/insights
+    error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS manual_account_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES manual_runs(id),
+    account_label TEXT NOT NULL,
+    list_id TEXT,
+    added INTEGER NOT NULL DEFAULT 0,
+    duplicates INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_manual_account_results_run ON manual_account_results(run_id);
 """
 
 
@@ -171,7 +199,7 @@ def reap_orphaned_runs():
     o processo esta so agora subindo, e porque o run anterior morreu sem
     finalizar."""
     with contextlib.closing(_connect()) as conn:
-        for table in ("runs", "sendgrid_runs", "postal_runs"):
+        for table in ("runs", "sendgrid_runs", "postal_runs", "manual_runs"):
             conn.execute(
                 f"UPDATE {table} SET status = 'failed', "
                 f"finished_at = COALESCE(finished_at, datetime('now')), "
@@ -480,6 +508,131 @@ def get_postal_run(run_id):
         result["date_breakdown"] = [dict(r) for r in dates]
         result["account_results"] = [dict(r) for r in accounts]
         return result
+
+
+def manual_start_run(value, kind):
+    init_db()
+    with contextlib.closing(_connect()) as conn:
+        cur = conn.execute(
+            "INSERT INTO manual_runs (started_at, status, value, kind) VALUES (datetime('now'), 'running', ?, ?)",
+            (value, kind),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def manual_record_account_result(run_id, account_label, list_id, added, duplicates, failed, error=None):
+    with contextlib.closing(_connect()) as conn:
+        conn.execute(
+            """INSERT INTO manual_account_results
+               (run_id, account_label, list_id, added, duplicates, failed, error)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, account_label, str(list_id) if list_id is not None else None, added, duplicates, failed, error),
+        )
+        conn.commit()
+
+
+def manual_finish_run(run_id, status, total_emails=None, error=None):
+    with contextlib.closing(_connect()) as conn:
+        conn.execute(
+            """UPDATE manual_runs SET finished_at = datetime('now'), status = ?,
+               total_emails = ?, error = ? WHERE id = ?""",
+            (status, total_emails, error, run_id),
+        )
+        conn.commit()
+
+
+def list_manual_runs(limit=50):
+    with contextlib.closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT * FROM manual_runs ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_manual_run(run_id):
+    with contextlib.closing(_connect()) as conn:
+        run = conn.execute("SELECT * FROM manual_runs WHERE id = ?", (run_id,)).fetchone()
+        if not run:
+            return None
+        accounts = conn.execute(
+            "SELECT account_label, list_id, added, duplicates, failed, error FROM manual_account_results "
+            "WHERE run_id = ? ORDER BY account_label, list_id",
+            (run_id,),
+        ).fetchall()
+        result = dict(run)
+        result["account_results"] = [dict(r) for r in accounts]
+        return result
+
+
+# Fonte -> (tabela de runs, tabela de account_results). As 4 tabelas
+# compartilham as colunas genericas usadas abaixo (id/started_at/status/
+# total_emails/error nos runs; account_label/added/duplicates/failed/error
+# nos account_results), entao a agregacao do /api/insights e uniforme.
+_INSIGHTS_SOURCES = (
+    ("mailgun", "runs", "account_results"),
+    ("sendgrid", "sendgrid_runs", "sendgrid_account_results"),
+    ("postal", "postal_runs", "postal_account_results"),
+    ("manual", "manual_runs", "manual_account_results"),
+)
+
+
+def get_insights():
+    """Agrega o historico dos 4 pipelines (mailgun/sendgrid/postal/manual)
+    desde o inicio: totais gerais, totais por fonte, volume diario por fonte
+    e a lista de erros mais recentes (run inteiro que falhou, ou uma conta
+    especifica que falhou dentro de um run que no geral deu certo)."""
+    with contextlib.closing(_connect()) as conn:
+        by_source = {}
+        timeline_map = {}
+        errors = []
+
+        for label, runs_table, acc_table in _INSIGHTS_SOURCES:
+            runs = conn.execute(
+                f"SELECT id, started_at, status, total_emails, error FROM {runs_table}"
+            ).fetchall()
+            acc_rows = conn.execute(
+                f"SELECT run_id, account_label, added, duplicates, failed, error FROM {acc_table}"
+            ).fetchall()
+
+            run_errors = [r for r in runs if r["status"] == "failed" or r["error"]]
+            acc_errors = [a for a in acc_rows if a["error"]]
+
+            by_source[label] = {
+                "runs_count": len(runs),
+                "emails": sum(r["total_emails"] or 0 for r in runs),
+                "added": sum(a["added"] or 0 for a in acc_rows),
+                "duplicates": sum(a["duplicates"] or 0 for a in acc_rows),
+                "failed": sum(a["failed"] or 0 for a in acc_rows),
+                "errors": len(run_errors) + len(acc_errors),
+            }
+
+            for r in runs:
+                date = (r["started_at"] or "")[:10]
+                if not date:
+                    continue
+                timeline_map.setdefault(date, {})
+                timeline_map[date][label] = timeline_map[date].get(label, 0) + (r["total_emails"] or 0)
+
+            for r in run_errors:
+                errors.append({
+                    "source": label, "run_id": r["id"], "started_at": r["started_at"],
+                    "error": r["error"] or "run falhou",
+                })
+            for a in acc_errors:
+                errors.append({
+                    "source": label, "run_id": a["run_id"], "started_at": None,
+                    "error": f"{a['account_label']}: {a['error']}",
+                })
+
+        timeline = [{"date": d, **counts} for d, counts in sorted(timeline_map.items())]
+        totals = {
+            key: sum(v[key] for v in by_source.values())
+            for key in ("emails", "added", "duplicates", "failed", "errors")
+        }
+        errors.sort(key=lambda e: e.get("started_at") or "", reverse=True)
+
+        return {"totals": totals, "by_source": by_source, "timeline": timeline, "errors": errors[:100]}
 
 
 if __name__ == "__main__":

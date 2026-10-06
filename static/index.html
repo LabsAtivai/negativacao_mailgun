@@ -235,6 +235,19 @@
   }
   #chart-tooltip .tt-value { font-weight: 700; font-size: 13px; }
   #chart-tooltip .tt-label { color: var(--muted); margin-top: 2px; }
+
+  .manual-input {
+    flex: 1 1 320px;
+    min-width: 240px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 9px 12px;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  .manual-input:focus { outline: 1px solid var(--accent); }
 </style>
 </head>
 <body>
@@ -247,6 +260,8 @@
   <button class="tab-btn active" data-tab="mailgun">Mailgun</button>
   <button class="tab-btn" data-tab="sendgrid">SendGrid</button>
   <button class="tab-btn" data-tab="postal">Postal</button>
+  <button class="tab-btn" data-tab="manual">Manual</button>
+  <button class="tab-btn" data-tab="insights">Insights</button>
 </nav>
 
 <section class="tab-panel active" id="tab-mailgun">
@@ -313,6 +328,46 @@
       <div class="empty">Selecione uma execucao a esquerda.</div>
     </div>
   </main>
+</section>
+
+<section class="tab-panel" id="tab-manual">
+  <section class="trend-section">
+    <div class="trend-header">
+      <h2>Negativar e-mail ou dominio manualmente</h2>
+    </div>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+      <input type="text" id="manual-value-input" placeholder="email@dominio.com ou dominio.com" class="manual-input">
+      <button class="run-btn" id="run-btn-manual">Negativar em todas as contas</button>
+    </div>
+    <p class="muted" style="font-size:12px; margin-top:10px;">Um e-mail completo negativa so aquele endereco. Um dominio sozinho (ex.: dominio-ruim.com) negativa o dominio inteiro (formato @dominio aceito pela Lista de e-mails a nao enviar da Snov.io). Enviado de verdade pra TODAS as contas Snov.io ativas.</p>
+  </section>
+  <main>
+    <div class="runs-panel" id="runs-panel-manual">
+      <div class="empty">Carregando...</div>
+    </div>
+    <div class="detail" id="detail-panel-manual">
+      <div class="empty">Selecione uma execucao a esquerda.</div>
+    </div>
+  </main>
+</section>
+
+<section class="tab-panel" id="tab-insights">
+  <section class="trend-section">
+    <div class="trend-header"><h2>Visao geral desde o inicio</h2></div>
+    <div class="stat-grid" id="insights-stat-grid"><div class="empty">Carregando...</div></div>
+  </section>
+  <section class="trend-section">
+    <h2>Volume negativado por dia e por fonte (ultimos 30 dias com movimento)</h2>
+    <div id="insights-timeline-chart"><div class="empty">Carregando...</div></div>
+  </section>
+  <section class="trend-section">
+    <h2>Totais por fonte (desde o inicio)</h2>
+    <div id="insights-source-chart"><div class="empty">Carregando...</div></div>
+  </section>
+  <section class="trend-section" style="border-bottom:none;">
+    <h2>Erros recentes</h2>
+    <div id="insights-errors"><div class="empty">Carregando...</div></div>
+  </section>
 </section>
 
 <div id="chart-tooltip"></div>
@@ -724,6 +779,258 @@ createDashboard({
       .sort((a, b) => a.label.localeCompare(b.label));
   },
 });
+
+// ==========================================================================
+// Manual: negativar e-mail/dominio avulso sob demanda, mesma logica de
+// runs-panel/detail-panel dos outros tabs, so que sem trend/breakdown chart
+// (nao ha dominio/data pra agrupar - so um valor por run).
+// ==========================================================================
+(function initManualTab() {
+  const input = document.getElementById('manual-value-input');
+  const runBtn = document.getElementById('run-btn-manual');
+  const runsPanel = document.getElementById('runs-panel-manual');
+  const detailPanel = document.getElementById('detail-panel-manual');
+  let selectedRunId = null;
+
+  async function trigger() {
+    const value = input.value.trim();
+    if (!value) { alert('Informe um e-mail ou dominio.'); return; }
+    if (!confirm(`Negativar "${value}" em TODAS as contas Snov.io ativas agora?`)) return;
+
+    runBtn.disabled = true;
+    runBtn.textContent = 'Enviando...';
+    try {
+      const res = await fetch('/api/manual/runs/trigger', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert('Nao foi possivel iniciar: ' + (err.detail || res.status));
+      } else {
+        input.value = '';
+      }
+    } catch (e) {
+      alert('Nao foi possivel iniciar: ' + e);
+    }
+    loadManualRuns();
+  }
+
+  runBtn.addEventListener('click', trigger);
+
+  async function loadManualRuns() {
+    const res = await fetch('/api/manual/runs?limit=100');
+    const runs = await res.json();
+    lastRefresh.textContent = 'Atualizado ' + new Date().toLocaleTimeString('pt-BR');
+
+    const running = runs.some(r => r.status === 'running');
+    runBtn.disabled = running;
+    runBtn.textContent = running ? 'Enviando...' : 'Negativar em todas as contas';
+
+    if (runs.length === 0) {
+      runsPanel.innerHTML = '<div class="empty">Nenhuma negativacao manual ainda.</div>';
+      return;
+    }
+
+    runsPanel.innerHTML = '';
+    runs.forEach(r => {
+      const row = el('div', {
+        className: 'run-row' + (r.id === selectedRunId ? ' active' : ''),
+        'data-id': r.id,
+      }, [
+        el('div', { className: 'top' }, [el('span', { className: 'id', textContent: r.value })]),
+        el('div', { className: 'muted', textContent: fmtDate(r.started_at) }),
+        el('div', { className: 'muted', textContent: r.kind === 'domain' ? 'dominio inteiro' : 'e-mail' }),
+      ]);
+      row.querySelector('.top').insertAdjacentHTML('beforeend', badge(r.status));
+      row.addEventListener('click', () => {
+        selectedRunId = r.id;
+        loadManualRuns();
+        loadManualDetail(selectedRunId);
+      });
+      runsPanel.appendChild(row);
+    });
+
+    if (selectedRunId === null && runs.length > 0) {
+      selectedRunId = runs[0].id;
+      loadManualRuns();
+      loadManualDetail(selectedRunId);
+    }
+  }
+
+  async function loadManualDetail(runId) {
+    const res = await fetch('/api/manual/runs/' + runId);
+    if (!res.ok) {
+      detailPanel.innerHTML = '<div class="empty">Execucao nao encontrada.</div>';
+      return;
+    }
+    const run = await res.json();
+    const totalAdded = run.account_results.reduce((s, a) => s + (a.added || 0), 0);
+    const totalDup = run.account_results.reduce((s, a) => s + (a.duplicates || 0), 0);
+    const totalFailed = run.account_results.reduce((s, a) => s + (a.failed || 0), 0);
+
+    detailPanel.innerHTML = '';
+    const statGrid = el('div', { className: 'stat-grid' });
+    [
+      [badge(run.status), 'status', true],
+      [run.value, 'valor'],
+      [run.kind === 'domain' ? 'dominio' : 'e-mail', 'tipo'],
+      [totalAdded, 'enviados Snov.io'],
+      [totalDup, 'duplicados'],
+      [totalFailed, 'falharam'],
+    ].forEach(([n, l, isHtml]) => {
+      const nEl = el('div', { className: 'n' });
+      if (isHtml) nEl.innerHTML = n; else nEl.textContent = n;
+      statGrid.appendChild(el('div', { className: 'stat' }, [nEl, el('div', { className: 'l', textContent: l })]));
+    });
+    detailPanel.appendChild(statGrid);
+
+    if (run.error) {
+      detailPanel.appendChild(el('p', { className: 'err-text', textContent: 'Erro: ' + run.error }));
+    }
+
+    detailPanel.appendChild(el('h2', { textContent: 'Envio por conta Snov.io' }));
+    if (run.account_results.length) {
+      const table = el('table');
+      table.appendChild(el('thead', {}, [el('tr', {}, ['Conta', 'List ID', 'Enviados', 'Duplicados', 'Falharam', 'Erro'].map(h => el('th', { textContent: h })))]));
+      table.appendChild(el('tbody', {}, run.account_results.map(a => el('tr', {}, [
+        el('td', { textContent: a.account_label }),
+        el('td', { textContent: a.list_id ?? '-' }),
+        el('td', { textContent: String(a.added) }),
+        el('td', { textContent: String(a.duplicates) }),
+        el('td', { textContent: String(a.failed) }),
+        el('td', { className: 'err-text', textContent: a.error ?? '' }),
+      ]))));
+      detailPanel.appendChild(table);
+    } else {
+      detailPanel.appendChild(el('p', { className: 'muted', textContent: 'Nenhum envio (sem contas ativas).' }));
+    }
+  }
+
+  loadManualRuns();
+  setInterval(loadManualRuns, 10000);
+  setInterval(() => { if (selectedRunId !== null) loadManualDetail(selectedRunId); }, 10000);
+})();
+
+// ==========================================================================
+// Insights: agrega os 4 pipelines (mailgun/sendgrid/postal/manual) desde o
+// inicio - totais, volume diario por fonte e erros recentes.
+// ==========================================================================
+const INSIGHTS_SOURCE_SERIES = [
+  { key: 'mailgun', color: 'var(--series-1)', label: 'Mailgun' },
+  { key: 'sendgrid', color: 'var(--series-2)', label: 'SendGrid' },
+  { key: 'postal', color: 'var(--series-3)', label: 'Postal' },
+  { key: 'manual', color: 'var(--series-4)', label: 'Manual' },
+];
+
+// Mesmo padrao visual do renderBreakdownChart interno do createDashboard
+// (legenda + barras empilhadas por linha), mas independente de cfg pra
+// poder ser reaproveitado tanto pela linha do tempo quanto pelo total por
+// fonte da aba Insights.
+function renderGroupedBarChart(rows, series) {
+  const wrap = el('div');
+  const legend = el('div', { className: 'chart-legend' });
+  series.forEach(s => {
+    const swatch = el('span', { className: 'swatch' });
+    swatch.style.background = s.color;
+    legend.appendChild(el('span', { className: 'key' }, [swatch, el('span', { textContent: s.label })]));
+  });
+  wrap.appendChild(legend);
+
+  const rowsWrap = el('div', { className: 'chart-rows' });
+  const max = Math.max(1, ...rows.map(r => r.total));
+  rows.forEach(r => {
+    const track = el('div', { className: 'track' });
+    series.forEach(s => {
+      const count = r.counts[s.key] || 0;
+      if (count <= 0) return;
+      const seg = el('div', { className: 'chart-seg' });
+      seg.style.background = s.color;
+      seg.style.width = ((count / max) * 100) + '%';
+      seg.addEventListener('pointermove', (e) => showTooltip(e.clientX, e.clientY, r.label + ' - ' + s.label, String(count)));
+      seg.addEventListener('pointerleave', hideTooltip);
+      track.appendChild(seg);
+    });
+    rowsWrap.appendChild(el('div', { className: 'chart-row' }, [
+      el('div', { className: 'label', textContent: r.label, title: r.label }),
+      track,
+      el('div', { className: 'total', textContent: String(r.total) }),
+    ]));
+  });
+  wrap.appendChild(rowsWrap);
+  return wrap;
+}
+
+async function loadInsights() {
+  const res = await fetch('/api/insights');
+  const data = await res.json();
+
+  const statGrid = document.getElementById('insights-stat-grid');
+  statGrid.innerHTML = '';
+  [
+    [data.totals.emails, 'e-mails processados (todas execucoes)'],
+    [data.totals.added, 'enviados ao Snov.io'],
+    [data.totals.duplicates, 'duplicados'],
+    [data.totals.failed, 'falharam no envio'],
+    [data.totals.errors, 'execucoes/contas com erro'],
+  ].forEach(([n, l]) => {
+    statGrid.appendChild(el('div', { className: 'stat' }, [
+      el('div', { className: 'n', textContent: String(n ?? 0) }),
+      el('div', { className: 'l', textContent: l }),
+    ]));
+  });
+
+  const timelineWrap = document.getElementById('insights-timeline-chart');
+  const timelineRows = data.timeline
+    .map(t => ({
+      label: t.date,
+      counts: t,
+      total: INSIGHTS_SOURCE_SERIES.reduce((s, series) => s + (t[series.key] || 0), 0),
+    }))
+    .filter(r => r.total > 0)
+    .slice(-30);
+  timelineWrap.innerHTML = '';
+  if (timelineRows.length) {
+    timelineWrap.appendChild(renderGroupedBarChart(timelineRows, INSIGHTS_SOURCE_SERIES));
+  } else {
+    timelineWrap.innerHTML = '<div class="empty">Sem execucoes ainda.</div>';
+  }
+
+  const sourceWrap = document.getElementById('insights-source-chart');
+  const sourceRows = INSIGHTS_SOURCE_SERIES
+    .map(s => ({
+      label: s.label,
+      counts: { [s.key]: data.by_source[s.key]?.emails || 0 },
+      total: data.by_source[s.key]?.emails || 0,
+    }))
+    .filter(r => r.total > 0);
+  sourceWrap.innerHTML = '';
+  if (sourceRows.length) {
+    sourceWrap.appendChild(renderGroupedBarChart(sourceRows, INSIGHTS_SOURCE_SERIES));
+  } else {
+    sourceWrap.innerHTML = '<div class="empty">Sem execucoes ainda.</div>';
+  }
+
+  const errorsWrap = document.getElementById('insights-errors');
+  if (data.errors.length) {
+    const table = el('table');
+    table.appendChild(el('thead', {}, [el('tr', {}, ['Fonte', 'Run', 'Quando', 'Erro'].map(h => el('th', { textContent: h })))]));
+    table.appendChild(el('tbody', {}, data.errors.map(e => el('tr', {}, [
+      el('td', { textContent: e.source }),
+      el('td', { textContent: '#' + e.run_id }),
+      el('td', { textContent: e.started_at ? fmtDate(e.started_at) : '-' }),
+      el('td', { className: 'err-text', textContent: e.error }),
+    ]))));
+    errorsWrap.innerHTML = '';
+    errorsWrap.appendChild(table);
+  } else {
+    errorsWrap.innerHTML = '<div class="empty">Nenhum erro registrado.</div>';
+  }
+}
+
+loadInsights();
+setInterval(loadInsights, 15000);
 </script>
 </body>
 </html>

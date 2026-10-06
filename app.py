@@ -1,19 +1,23 @@
 """
 Painel de acompanhamento das negativacoes (Mailgun -> Snov.io, SendGrid ->
-Snov.io e Postal -> Snov.io). Le o historico gravado por
-negativacao_mailgun.py, negativacao_sendgrid.py e negativacao_postal.py no
-SQLite (db.py), e pode disparar os tres via POST /api/runs/trigger,
-/api/sendgrid/runs/trigger e /api/postal/runs/trigger (mesmo processo/imagem,
-subprocess.Popen - o botao "Rodar agora" do painel usa isso). Postal e
-diferente dos outros dois: nao ha API de pull, o dado so chega via webhook
-(POST /api/postal/webhook), que grava eventos brutos consumidos depois em
-lote por negativacao_postal.py.
+Snov.io e Postal -> Snov.io), mais a negativacao manual avulsa (aba
+"Manual") e o /api/insights que agrega os 4 num so lugar. Le o historico
+gravado por negativacao_mailgun.py, negativacao_sendgrid.py,
+negativacao_postal.py e negativacao_manual.py no SQLite (db.py), e pode
+disparar os 4 via POST /api/runs/trigger, /api/sendgrid/runs/trigger,
+/api/postal/runs/trigger e /api/manual/runs/trigger (mesmo processo/imagem,
+subprocess.Popen - os botoes do painel usam isso). Postal e diferente dos
+outros: nao ha API de pull, o dado so chega via webhook (POST
+/api/postal/webhook), que grava eventos brutos consumidos depois em lote por
+negativacao_postal.py. Manual tambem nao tem fonte externa: o valor
+(e-mail/dominio) vem direto do formulario do painel.
 
 Uso:
     uvicorn app:app --host 0.0.0.0 --port 8080
 """
 import hmac
 import os
+import re
 import subprocess
 import sys
 
@@ -224,6 +228,40 @@ async def api_postal_webhook(request: Request, key: str | None = None):
     # Eventos irrelevantes (MessageSent, MessageDelayed, MessageLoaded,
     # MessageLinkClicked, DomainDNSError, ...) sao so confirmados, sem gravar nada.
     return {"status": "ok"}
+
+
+class ManualTrigger(BaseModel):
+    value: str
+
+
+@app.post("/api/manual/runs/trigger")
+def api_trigger_manual_run(payload: ManualTrigger):
+    value = (payload.value or "").strip()
+    if not value or re.search(r"\s", value):
+        raise HTTPException(status_code=400, detail="Informe um e-mail ou dominio, sem espacos")
+    if _has_running(db.list_manual_runs(limit=5)):
+        raise HTTPException(status_code=409, detail="Ja ha uma negativacao manual em andamento")
+    subprocess.Popen([sys.executable, "negativacao_manual.py", "--value", value], cwd=BASE_DIR)
+    return {"status": "started"}
+
+
+@app.get("/api/manual/runs")
+def api_list_manual_runs(limit: int = 50):
+    limit = max(1, min(limit, 500))
+    return db.list_manual_runs(limit=limit)
+
+
+@app.get("/api/manual/runs/{run_id}")
+def api_get_manual_run(run_id: int):
+    run = db.get_manual_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run nao encontrado")
+    return run
+
+
+@app.get("/api/insights")
+def api_insights():
+    return db.get_insights()
 
 
 # ==============================================================================
