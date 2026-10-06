@@ -91,7 +91,7 @@ CREATE INDEX IF NOT EXISTS idx_sendgrid_account_results_run ON sendgrid_account_
 CREATE TABLE IF NOT EXISTS postal_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     received_at TEXT NOT NULL DEFAULT (datetime('now')),
-    event_kind TEXT NOT NULL,   -- delivery_failed | held | bounced
+    event_kind TEXT NOT NULL,   -- delivery_failed | soft_failed | held | bounced
     status TEXT,
     recipient TEXT NOT NULL,
     message_token TEXT,
@@ -115,7 +115,7 @@ CREATE TABLE IF NOT EXISTS postal_date_breakdown (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id INTEGER NOT NULL REFERENCES postal_runs(id),
     date TEXT NOT NULL,
-    kind TEXT NOT NULL,   -- delivery_failed | held | bounced
+    kind TEXT NOT NULL,   -- delivery_failed | soft_failed | held | bounced
     count INTEGER NOT NULL
 );
 

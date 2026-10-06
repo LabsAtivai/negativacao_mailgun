@@ -47,10 +47,11 @@ POSTAL_WEBHOOK_SECRET = os.getenv("POSTAL_WEBHOOK_SECRET")
 # Status events (payload com "message"+"status") que indicam e-mail ruim.
 # Chave = valor real do campo "status" no body. O Postal NAO manda header
 # X-Postal-Event, e o enum real do campo "status" e Sent/SoftFail/HardFail/
-# Held (SoftFail = falha temporaria, ainda tentando retry - nao negativa;
-# HardFail = desistiu de vez apos esgotar as tentativas - negativa).
+# Held (SoftFail = falha temporaria, ainda tentando retry; HardFail =
+# desistiu de vez apos esgotar as tentativas. Os dois sao negativados).
 POSTAL_STATUS_KIND_MAP = {
     "HardFail": "delivery_failed",
+    "SoftFail": "soft_failed",
     "Held": "held",
 }
 
@@ -217,7 +218,6 @@ async def api_postal_webhook(request: Request, key: str | None = None):
         return {"status": "ok"}
 
     # Status event: {"message": {...}, "status": "Sent"|"SoftFail"|"HardFail"|"Held", ...}.
-    # SoftFail = falha temporaria (ainda em retry) - nao negativa.
     kind = POSTAL_STATUS_KIND_MAP.get(payload.get("status"))
     if kind:
         message = payload.get("message") or {}

@@ -745,7 +745,7 @@ createDashboard({
   },
 });
 
-// ---- Postal: breakdown por data, 3 series (delivery_failed/held/bounced -
+// ---- Postal: breakdown por data, 3 series (delivery_failed/soft_failed/held/bounced -
 // eventos chegam via webhook, nao ha "dominio", so o tipo de falha) ----
 createDashboard({
   prefix: 'postal',
@@ -759,6 +759,7 @@ createDashboard({
   breakdownTitle: 'Negativados por data (Postal)',
   series: [
     { key: 'delivery_failed', color: 'var(--series-1)', label: 'Delivery failed' },
+    { key: 'soft_failed', color: 'var(--series-4)', label: 'Soft failed' },
     { key: 'held', color: 'var(--series-2)', label: 'Held' },
     { key: 'bounced', color: 'var(--series-3)', label: 'Bounced' },
   ],
@@ -774,7 +775,7 @@ createDashboard({
       .map(([date, counts]) => ({
         label: date,
         counts,
-        total: (counts.delivery_failed || 0) + (counts.held || 0) + (counts.bounced || 0),
+        total: (counts.delivery_failed || 0) + (counts.soft_failed || 0) + (counts.held || 0) + (counts.bounced || 0),
       }))
       .sort((a, b) => a.label.localeCompare(b.label));
   },
