@@ -340,12 +340,12 @@ def main():
             print(f"Contas ativas SEM list_ids cadastrado (nada sera enviado para elas): {contas_sem_list_id}\n")
 
         if args.dry_run:
-            db.postal_finish_run(run_id, status="completed", total_emails=len(emails, source=source))
+            db.postal_finish_run(run_id, status="completed", total_emails=len(emails), source=source)
             print("--dry-run: nada foi enviado, eventos NAO marcados como processados.")
             return
 
         if not targets:
-            db.postal_finish_run(run_id, status="completed", total_emails=len(emails, source=source))
+            db.postal_finish_run(run_id, status="completed", total_emails=len(emails), source=source)
             print("Nenhuma lista Snov (list_id) encontrada nas contas ativas. Nada a fazer.")
             return
 
@@ -368,10 +368,10 @@ def main():
                 extra = f", {failed} falharam" if failed else ""
                 print(f"  {account_label} [list={list_id}]: {added} enviados, {duplicates} duplicados{extra}")
 
-        db.postal_finish_run(run_id, status="completed", total_emails=len(emails, source=source))
+        db.postal_finish_run(run_id, status="completed", total_emails=len(emails), source=source)
         db.mark_postal_events_processed([e["id"] for e in events], source=source)
     except Exception as exc:
-        db.postal_finish_run(run_id, status="failed", error=str(exc, source=source))
+        db.postal_finish_run(run_id, status="failed", error=str(exc), source=source)
         raise
 
 
