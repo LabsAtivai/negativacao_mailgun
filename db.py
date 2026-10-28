@@ -207,6 +207,44 @@ CREATE TABLE IF NOT EXISTS manual_account_results (
 );
 
 CREATE INDEX IF NOT EXISTS idx_manual_account_results_run ON manual_account_results(run_id);
+-- Negativacao via planilha (Google Sheets, aba "Negativacao Geral"): lida todo
+-- dia (negativacao_planilha.py), so a coluna de e-mail. E-mail vai direto,
+-- dominio e expandido em e-mails pela API de Domain Search da Snov.io.
+CREATE TABLE IF NOT EXISTS planilha_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    dry_run INTEGER NOT NULL DEFAULT 0,
+    rows_new INTEGER,           -- linhas sem OK com algum valor
+    rows_invalid INTEGER,       -- nem e-mail nem dominio (ou e-mail livre): ficam sem marca
+    rows_marked INTEGER,        -- linhas que receberam OK nesta run
+    domains_count INTEGER,
+    total_emails INTEGER,       -- e-mails unicos enviados (diretos + expandidos)
+    error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS planilha_domain_expansions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES planilha_runs(id),
+    domain TEXT NOT NULL,
+    emails_found INTEGER NOT NULL DEFAULT 0,
+    error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS planilha_account_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES planilha_runs(id),
+    account_label TEXT NOT NULL,
+    list_id TEXT,
+    added INTEGER NOT NULL DEFAULT 0,
+    duplicates INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_planilha_domain_expansions_run ON planilha_domain_expansions(run_id);
+CREATE INDEX IF NOT EXISTS idx_planilha_account_results_run ON planilha_account_results(run_id);
 """
 
 
@@ -246,7 +284,7 @@ def reap_orphaned_runs():
     o processo esta so agora subindo, e porque o run anterior morreu sem
     finalizar."""
     with contextlib.closing(_connect()) as conn:
-        for table in ("runs", "sendgrid_runs", "postal_runs", "postal2_runs", "manual_runs"):
+        for table in ("runs", "sendgrid_runs", "postal_runs", "postal2_runs", "manual_runs", "planilha_runs"):
             conn.execute(
                 f"UPDATE {table} SET status = 'failed', "
                 f"finished_at = COALESCE(finished_at, datetime('now')), "
@@ -631,6 +669,76 @@ def get_manual_run(run_id):
         return result
 
 
+def planilha_start_run(dry_run=False):
+    init_db()
+    with contextlib.closing(_connect()) as conn:
+        cur = conn.execute(
+            "INSERT INTO planilha_runs (started_at, status, dry_run) VALUES (datetime('now'), 'running', ?)",
+            (1 if dry_run else 0,),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def planilha_record_domain_expansion(run_id, domain, emails_found, error=None):
+    with contextlib.closing(_connect()) as conn:
+        conn.execute(
+            "INSERT INTO planilha_domain_expansions (run_id, domain, emails_found, error) VALUES (?, ?, ?, ?)",
+            (run_id, domain, emails_found, error),
+        )
+        conn.commit()
+
+
+def planilha_record_account_result(run_id, account_label, list_id, added, duplicates, failed, error=None):
+    with contextlib.closing(_connect()) as conn:
+        conn.execute(
+            """INSERT INTO planilha_account_results
+               (run_id, account_label, list_id, added, duplicates, failed, error)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, account_label, str(list_id) if list_id is not None else None, added, duplicates, failed, error),
+        )
+        conn.commit()
+
+
+def planilha_finish_run(run_id, status, total_emails=None, rows_new=None, rows_invalid=None,
+                        rows_marked=None, domains_count=None, error=None):
+    with contextlib.closing(_connect()) as conn:
+        conn.execute(
+            """UPDATE planilha_runs SET finished_at = datetime('now'), status = ?, total_emails = ?,
+               rows_new = ?, rows_invalid = ?, rows_marked = ?, domains_count = ?, error = ? WHERE id = ?""",
+            (status, total_emails, rows_new, rows_invalid, rows_marked, domains_count, error, run_id),
+        )
+        conn.commit()
+
+
+def list_planilha_runs(limit=50):
+    with contextlib.closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT * FROM planilha_runs ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_planilha_run(run_id):
+    with contextlib.closing(_connect()) as conn:
+        run = conn.execute("SELECT * FROM planilha_runs WHERE id = ?", (run_id,)).fetchone()
+        if not run:
+            return None
+        domains = conn.execute(
+            "SELECT domain, emails_found, error FROM planilha_domain_expansions WHERE run_id = ? ORDER BY domain",
+            (run_id,),
+        ).fetchall()
+        accounts = conn.execute(
+            "SELECT account_label, list_id, added, duplicates, failed, error FROM planilha_account_results "
+            "WHERE run_id = ? ORDER BY account_label, list_id",
+            (run_id,),
+        ).fetchall()
+        result = dict(run)
+        result["domain_expansions"] = [dict(r) for r in domains]
+        result["account_results"] = [dict(r) for r in accounts]
+        return result
+
+
 # Fonte -> (tabela de runs, tabela de account_results). As 4 tabelas
 # compartilham as colunas genericas usadas abaixo (id/started_at/status/
 # total_emails/error nos runs; account_label/added/duplicates/failed/error
@@ -641,6 +749,7 @@ _INSIGHTS_SOURCES = (
     ("postal", "postal_runs", "postal_account_results"),
     ("postal2", "postal2_runs", "postal2_account_results"),
     ("manual", "manual_runs", "manual_account_results"),
+    ("planilha", "planilha_runs", "planilha_account_results"),
 )
 
 

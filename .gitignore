@@ -5,3 +5,4 @@ data/
 logs/
 falhas_*.txt
 .claude/
+secrets/

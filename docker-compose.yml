@@ -22,6 +22,14 @@ x-env: &env
   SCHEDULE_TIMEZONE: ${SCHEDULE_TIMEZONE:-America/Sao_Paulo}
   SCHEDULE_HOUR: ${SCHEDULE_HOUR:-1}
   SCHEDULE_MINUTE: ${SCHEDULE_MINUTE:-0}
+  # Planilha (negativacao_planilha.py): roda as 00:00 por padrao, dentro do "dashboard".
+  SHEET_ID: ${SHEET_ID:-1DsZ_8rQ0vENWVnDjE1UQSK_AtzTiUyacZRgI1fzx5iA}
+  SHEET_TAB: ${SHEET_TAB:-Negativação Geral}
+  GOOGLE_SERVICE_ACCOUNT_JSON: ${GOOGLE_SERVICE_ACCOUNT_JSON:-/app/secrets/google-service-account.json}
+  SHEET_SCHEDULE_TIMEZONE: ${SHEET_SCHEDULE_TIMEZONE:-America/Sao_Paulo}
+  SHEET_SCHEDULE_HOUR: ${SHEET_SCHEDULE_HOUR:-0}
+  SHEET_SCHEDULE_MINUTE: ${SHEET_SCHEDULE_MINUTE:-0}
+  DOMAIN_SKIP: ${DOMAIN_SKIP:-}
 
 x-sendgrid-mysql-env: &sendgrid-mysql-env
   DB_HOST: ${SENDGRID_DB_HOST}
@@ -45,6 +53,7 @@ services:
       <<: [*env, *sendgrid-mysql-env]
     volumes:
       - negativacao_data:/app/data
+      - ${GOOGLE_SERVICE_ACCOUNT_FILE:-./secrets/google-service-account.json}:/app/secrets/google-service-account.json:ro
     networks:
       - ativaai
 

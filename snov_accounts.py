@@ -93,3 +93,17 @@ def pick_accounts_for_mailbox(accounts, mailbox):
         if like:
             return like, f"e-mail da conta parecido com {term!r} (trecho do dominio)"
     return [], f"nenhum e-mail de conta igual ou parecido com {term!r}"
+
+
+# Contas Snov.io alvo da negativacao via planilha (negativacao_planilha.py):
+# so estas 5, independente da lista do time comercial acima.
+SHEET_SNOV_ACCOUNTS = frozenset(
+    email.lower()
+    for email in (
+        "sdr10@ativa.ai",
+        "salesops3@ativa.ai",
+        "sdrremoto2@ativa.ai",
+        "proativa.io3@ativa.ai",
+        "blackfriday@ativa.ai",
+    )
+)

@@ -6,3 +6,4 @@ uvicorn==0.32.0
 mysql-connector-python==9.1.0
 apscheduler==3.10.4
 tzdata
+gspread==6.1.4

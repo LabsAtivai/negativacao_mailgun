@@ -315,6 +315,28 @@ def api_get_manual_run(run_id: int):
     return run
 
 
+@app.post("/api/planilha/runs/trigger")
+def api_trigger_planilha_run():
+    if _has_running(db.list_planilha_runs(limit=5)):
+        raise HTTPException(status_code=409, detail="Ja ha uma execucao da planilha em andamento")
+    subprocess.Popen([sys.executable, "negativacao_planilha.py"], cwd=BASE_DIR)
+    return {"status": "started"}
+
+
+@app.get("/api/planilha/runs")
+def api_list_planilha_runs(limit: int = 50):
+    limit = max(1, min(limit, 500))
+    return db.list_planilha_runs(limit=limit)
+
+
+@app.get("/api/planilha/runs/{run_id}")
+def api_get_planilha_run(run_id: int):
+    run = db.get_planilha_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run nao encontrado")
+    return run
+
+
 @app.get("/api/insights")
 def api_insights():
     return db.get_insights()
@@ -361,5 +383,14 @@ scheduler.add_job(
         "Postal2",
     ),
     _cron, id="postal2_nightly", replace_existing=True,
+)
+# Planilha: 00:00 por padrao, horario proprio (os demais seguem em SCHEDULE_HOUR).
+SHEET_SCHEDULE_TIMEZONE = os.getenv("SHEET_SCHEDULE_TIMEZONE", SCHEDULE_TIMEZONE)
+SHEET_SCHEDULE_HOUR = int(os.getenv("SHEET_SCHEDULE_HOUR", "0"))
+SHEET_SCHEDULE_MINUTE = int(os.getenv("SHEET_SCHEDULE_MINUTE", "0"))
+scheduler.add_job(
+    lambda: _run_scheduled_pipeline([sys.executable, "negativacao_planilha.py"], db.list_planilha_runs, "Planilha"),
+    CronTrigger(hour=SHEET_SCHEDULE_HOUR, minute=SHEET_SCHEDULE_MINUTE, timezone=SHEET_SCHEDULE_TIMEZONE),
+    id="planilha_nightly", replace_existing=True,
 )
 scheduler.start()

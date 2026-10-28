@@ -261,6 +261,7 @@
   <button class="tab-btn" data-tab="sendgrid">SendGrid</button>
   <button class="tab-btn" data-tab="postal">Postal</button>
   <button class="tab-btn" data-tab="postal2">Postal2</button>
+  <button class="tab-btn" data-tab="planilha">Planilha</button>
   <button class="tab-btn" data-tab="manual">Manual</button>
   <button class="tab-btn" data-tab="insights">Insights</button>
 </nav>
@@ -349,6 +350,27 @@
       <div class="empty">Carregando...</div>
     </div>
     <div class="detail" id="detail-panel-postal2">
+      <div class="empty">Selecione uma execucao a esquerda.</div>
+    </div>
+  </main>
+</section>
+
+<section class="tab-panel" id="tab-planilha">
+  <section class="trend-section">
+    <div class="trend-header">
+      <h2>E-mails unicos por execucao (historico)</h2>
+      <button class="run-btn" id="run-btn-planilha">Rodar agora</button>
+    </div>
+    <p class="muted" style="font-size:12px; margin-bottom:10px;">Le a aba Negativacao Geral todo dia as 00:00 e negativa o que estiver sem OK nas 5 contas Snov.io da planilha. Dominios sao expandidos em e-mails pela Domain Search da Snov.io.</p>
+    <div class="trend-chart-wrap">
+      <div class="trend-chart" id="trend-chart-planilha"><div class="empty">Carregando...</div></div>
+    </div>
+  </section>
+  <main>
+    <div class="runs-panel" id="runs-panel-planilha">
+      <div class="empty">Carregando...</div>
+    </div>
+    <div class="detail" id="detail-panel-planilha">
       <div class="empty">Selecione uma execucao a esquerda.</div>
     </div>
   </main>
@@ -841,6 +863,30 @@ createDashboard({
   },
 });
 
+// ---- Planilha: breakdown por dominio expandido (e-mails achados pela Domain Search) ----
+createDashboard({
+  prefix: 'planilha',
+  apiBase: '/api/planilha/runs',
+  triggerUrl: '/api/planilha/runs/trigger',
+  confirmMessage: () => 'Rodar a negativacao da planilha agora? Le a aba Negativacao Geral, envia de verdade pras 5 contas Snov.io da planilha (dominios gastam credito na Domain Search) e grava OK nas linhas processadas.',
+  groupLabel: 'Dominio',
+  breakdownTitle: 'E-mails encontrados por dominio (Domain Search)',
+  series: [
+    { key: 'found', color: 'var(--series-3)', label: 'E-mails encontrados' },
+  ],
+  runSummaryLine: (r) => `${r.rows_new ?? '-'} linhas · ${r.total_emails ?? '-'} e-mails`,
+  extraStats: (run) => [
+    [run.rows_new ?? '-', 'linhas sem OK'],
+    [run.rows_marked ?? '-', 'marcadas OK'],
+    [run.rows_invalid ?? '-', 'ignoradas'],
+    [run.domains_count ?? '-', 'dominios'],
+  ],
+  buildBreakdownRows: (run) => (run.domain_expansions || [])
+    .filter(d => d.emails_found > 0)
+    .map(d => ({ label: d.domain, counts: { found: d.emails_found }, total: d.emails_found }))
+    .sort((a, b) => b.total - a.total),
+});
+
 // ==========================================================================
 // Manual: negativar e-mail/dominio avulso sob demanda, mesma logica de
 // runs-panel/detail-panel dos outros tabs, so que sem trend/breakdown chart
@@ -984,6 +1030,7 @@ const INSIGHTS_SOURCE_SERIES = [
   { key: 'postal', color: 'var(--series-3)', label: 'Postal' },
   { key: 'postal2', color: 'var(--series-5)', label: 'Postal2' },
   { key: 'manual', color: 'var(--series-4)', label: 'Manual' },
+  { key: 'planilha', color: '#d4a017', label: 'Planilha' },
 ];
 
 // Mesmo padrao visual do renderBreakdownChart interno do createDashboard
