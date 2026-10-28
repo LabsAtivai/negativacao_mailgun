@@ -53,7 +53,7 @@ services:
       <<: [*env, *sendgrid-mysql-env]
     volumes:
       - negativacao_data:/app/data
-      - ${GOOGLE_SERVICE_ACCOUNT_FILE:-./secrets/google-service-account.json}:/app/secrets/google-service-account.json:ro
+      - ${GOOGLE_SERVICE_ACCOUNT_FILE:-/opt/negativacao/google-service-account.json}:/app/secrets/google-service-account.json:ro
     networks:
       - ativaai
 
