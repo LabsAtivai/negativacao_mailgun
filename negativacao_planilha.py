@@ -72,6 +72,9 @@ HTTP_TIMEOUT = (10, 30)
 
 EMAIL_FIND_RE = re.compile(r"[^\s<>@,;\"']+@[^\s<>@,;\"']+\.[^\s<>@,;\"']+")
 DOMAIN_RE = re.compile(r"^([a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$")
+# Valida o e-mail inteiro: pega TLD truncado ("...com.b") e caracteres que a Snov.io rejeita
+# com 400 "items.N must be a valid email address or domain".
+STRICT_EMAIL_RE = re.compile(r"^[a-z0-9._%+\-]+@([a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)+[a-z]{2,}$")
 
 # Dominios de e-mail livre: o Domain Search nao lista "todos os usuarios"
 # deles, so gastaria credito.
@@ -140,7 +143,10 @@ def classify(raw):
     text = raw.strip().lower()
     match = EMAIL_FIND_RE.search(text)
     if match:
-        return "email", match.group(0).strip(".")
+        email = match.group(0).strip(".")
+        if not STRICT_EMAIL_RE.match(email):
+            return "skip", f"e-mail invalido ({email})"
+        return "email", email
     domain = text.strip(" <>\"'\\")
     domain = domain[1:] if domain.startswith("@") else domain
     if DOMAIN_RE.match(domain):
@@ -262,34 +268,39 @@ def _extract_emails(payload):
     return found
 
 
-def _next_url(payload):
-    meta = payload.get("meta")
+def _next_start(payload, domain):
+    """Proxima pagina da Domain Search: links.next e uma URL de START (POST, gera novo task_hash e
+    custa 1 credito), nao de resultado. Sem ela, monta a partir de meta.next (cursor)."""
     links = payload.get("links")
-    nxt = (
-        (meta.get("next") if isinstance(meta, dict) else None)  # formato real observado: meta.next ("" na ultima pagina)
-        or payload.get("next")
-        or (links.get("next") if isinstance(links, dict) else None)
-    )
-    return nxt or None
+    nxt = links.get("next") if isinstance(links, dict) else None
+    if nxt:
+        return nxt, None
+    meta = payload.get("meta")
+    cursor = meta.get("next") if isinstance(meta, dict) else None
+    if cursor:
+        return SNOVIO_DOMAIN_EMAILS_START_URL, {"domain": domain, "next": cursor}
+    return None, None
 
 
 def search_domain_emails(token_holder, domain, log_prefix=""):
     """Todos os e-mails do dominio pela Domain Search da Snov.io (assincrona: start + result, paginada
-    de 50 em 50 via "next"). Levanta excecao se a busca falhar - a linha fica sem marca."""
+    de 50 em 50). Levanta excecao se a busca falhar - a linha fica sem marca."""
     headers = lambda: {"Authorization": f"Bearer {token_holder.get()}"}  # noqa: E731
 
-    resp = requests.post(SNOVIO_DOMAIN_EMAILS_START_URL, params={"domain": domain}, headers=headers(), timeout=HTTP_TIMEOUT)
-    resp.raise_for_status()
-    start = resp.json()
-    task_hash = start.get("meta", {}).get("task_hash") or start.get("task_hash")
-    url = start.get("links", {}).get("result") or start.get("result")
-    if not url:
-        if not task_hash:
-            raise RuntimeError(f"Domain Search sem task_hash/result: {start}")
-        url = SNOVIO_DOMAIN_EMAILS_RESULT_URL.format(task_hash=task_hash)
-
     emails = []
-    while url:
+    start_url, params = SNOVIO_DOMAIN_EMAILS_START_URL, {"domain": domain}
+    while start_url:
+        resp = requests.post(start_url, params=params, headers=headers(), timeout=HTTP_TIMEOUT)
+        resp.raise_for_status()
+        start = resp.json()
+        task_hash = start.get("meta", {}).get("task_hash") or start.get("task_hash")
+        links = start.get("links")
+        url = (links.get("result") if isinstance(links, dict) else None) or start.get("result")
+        if not url:
+            if not task_hash:
+                raise RuntimeError(f"Domain Search sem task_hash/result: {start}")
+            url = SNOVIO_DOMAIN_EMAILS_RESULT_URL.format(task_hash=task_hash)
+
         for _ in range(DOMAIN_POLL_MAX_ATTEMPTS):
             time.sleep(max(DOMAIN_POLL_SECONDS, MIN_SECONDS_BETWEEN_REQUESTS))
             resp = requests.get(url, headers=headers(), timeout=HTTP_TIMEOUT)
@@ -301,8 +312,8 @@ def search_domain_emails(token_holder, domain, log_prefix=""):
                 break
         else:
             raise RuntimeError("Domain Search nao concluiu a tempo")
-        emails.extend(_extract_emails(payload))
-        url = _next_url(payload)
+        emails.extend(e for e in _extract_emails(payload) if STRICT_EMAIL_RE.match(e))
+        start_url, params = _next_start(payload, domain)
     return sorted(set(emails))
 
 
@@ -310,6 +321,7 @@ def send_to_do_not_email_list(token_holder, list_id, emails, batch_size, log_pre
     total_added = 0
     all_duplicates = []
     failed_emails = []
+    rejected_emails = []  # a Snov.io disse que nao e e-mail/dominio valido (400 items.N): descartados, nao reenviados
     last_request_time = None
     total_batches = (len(emails) + batch_size - 1) // batch_size
 
@@ -340,6 +352,18 @@ def send_to_do_not_email_list(token_holder, list_id, emails, batch_size, log_pre
                 )
                 time.sleep(backoff)
                 continue
+
+            if resp.status_code == 400:
+                bad = re.search(r"items\.(\d+)", resp.text)
+                if bad and int(bad.group(1)) < len(batch):
+                    dropped = batch.pop(int(bad.group(1)))
+                    rejected_emails.append(dropped)
+                    print(f"{log_prefix}Snov.io rejeitou {dropped!r} ({resp.text[:120]}); descartado, reenviando o lote.")
+                    last_request_time = None
+                    if not batch:
+                        batch_ok = True
+                        break
+                    continue
 
             transient_http_error = resp.status_code == 429 or resp.status_code >= 500
             entries = None
@@ -380,7 +404,7 @@ def send_to_do_not_email_list(token_holder, list_id, emails, batch_size, log_pre
         if batch_num == 1 or batch_num % 20 == 0 or batch_num == total_batches:
             print(f"{log_prefix}Lote {batch_num}/{total_batches}: {total_added} e-mail(s) enviados ate agora.")
 
-    return total_added, all_duplicates, failed_emails
+    return total_added, all_duplicates, failed_emails, rejected_emails
 
 
 def process_account(account, email_list, batch_size, credentials_api_url, credentials_api_key):
@@ -394,23 +418,23 @@ def process_account(account, email_list, batch_size, credentials_api_url, creden
     except Exception as exc:
         msg = str(exc)
         print(f"{prefix}ERRO ao obter credenciais/token: {msg}")
-        return [(account_label, list_id, 0, 0, 0, msg) for list_id in list_ids]
+        return [(account_label, list_id, 0, 0, 0, msg, []) for list_id in list_ids]
 
     results = []
     for list_id in list_ids:
         lp = f"{prefix}[list={list_id}] "
         try:
-            added, duplicates, failed = send_to_do_not_email_list(token_holder, list_id, email_list, batch_size, log_prefix=lp)
-            print(f"{lp}Concluido: {added} enviados, {len(duplicates)} duplicados, {len(failed)} falharam.")
-            results.append((account_label, list_id, added, len(duplicates), len(failed), None))
+            added, duplicates, failed, rejected = send_to_do_not_email_list(token_holder, list_id, email_list, batch_size, log_prefix=lp)
+            print(f"{lp}Concluido: {added} enviados, {len(duplicates)} duplicados, {len(failed)} falharam, {len(rejected)} rejeitados.")
+            results.append((account_label, list_id, added, len(duplicates), len(failed), None, rejected))
         except requests.HTTPError as exc:
             msg = f"{exc} -> {exc.response.text[:300]}"
             print(f"{lp}ERRO: {msg}")
-            results.append((account_label, list_id, 0, 0, 0, msg))
+            results.append((account_label, list_id, 0, 0, 0, msg, []))
         except Exception as exc:
             msg = str(exc)
             print(f"{lp}ERRO: {msg}")
-            results.append((account_label, list_id, 0, 0, 0, msg))
+            results.append((account_label, list_id, 0, 0, 0, msg, []))
 
     return results
 
@@ -517,6 +541,7 @@ def main():
         print(f"\n{len(email_list)} e-mail(s) unico(s) a negativar em {len(accounts)} conta(s).\n")
 
         send_ok = True
+        rejected_all = set()  # e-mails que a Snov.io recusou: ficam sem marca na planilha
         if email_list:
             flat_results = []
             with ThreadPoolExecutor(max_workers=args.workers) as executor:
@@ -528,7 +553,8 @@ def main():
                     flat_results.extend(future.result())
 
             print("\nResumo final:")
-            for account_label, list_id, added, duplicates, failed, error in sorted(flat_results, key=lambda r: (str(r[0]), str(r[1]))):
+            for account_label, list_id, added, duplicates, failed, error, rejected in sorted(flat_results, key=lambda r: (str(r[0]), str(r[1]))):
+                rejected_all.update(rejected)
                 db.planilha_record_account_result(run_id, str(account_label), list_id, added, duplicates, failed, error)
                 if error or failed:
                     send_ok = False
@@ -540,8 +566,13 @@ def main():
 
         rows_marked = 0
         if send_ok:
-            to_mark = [(n, raw) for n, raw in rows if classify(raw)[0] == "email" or
-                       (classify(raw)[0] == "domain" and classify(raw)[1] not in failed_domains)]
+            to_mark = []
+            for n, raw in rows:
+                kind, value = classify(raw)
+                if (kind == "email" and value not in rejected_all) or (kind == "domain" and value not in failed_domains):
+                    to_mark.append((n, raw))
+            if rejected_all:
+                print(f"\n{len(rejected_all)} e-mail(s) rejeitado(s) pela Snov.io (linhas ficam sem marca): {sorted(rejected_all)[:20]}")
             if to_mark:
                 marked, changed = mark_rows_ok(ws, to_mark, email_col, mark_col)
                 rows_marked = marked
