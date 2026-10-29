@@ -263,10 +263,13 @@ def _extract_emails(payload):
 
 
 def _next_url(payload):
-    nxt = payload.get("next")
-    if not nxt:
-        links = payload.get("links")
-        nxt = links.get("next") if isinstance(links, dict) else None
+    meta = payload.get("meta")
+    links = payload.get("links")
+    nxt = (
+        (meta.get("next") if isinstance(meta, dict) else None)  # formato real observado: meta.next ("" na ultima pagina)
+        or payload.get("next")
+        or (links.get("next") if isinstance(links, dict) else None)
+    )
     return nxt or None
 
 
